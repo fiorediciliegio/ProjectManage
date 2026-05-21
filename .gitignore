@@ -1,0 +1,56 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/db.sqlite3
+backend/media/
+backend/.env
+.venv/
+venv/
+**/.venv/
+*.sqlite3
+media/
+
+# React
+frontend/node_modules/
+frontend/build/
+frontend/.env
+frontend/.env.local
+
+# Local env files
+.env
+*.env.local
+
+# Large local model files
+models/
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+*.pt
+*.pth
+*.ckpt
+
+# Vector database and search engine local data
+qdrant_storage/
+qdrant_storage*/
+elasticsearch/
+elastic_data/
+es_data/
+docker-data/
+backend/qdrant_storage/
+backend/elasticsearch/
+backend/elastic_data/
+backend/es_data/
+
+# OCR and local model caches if created inside the repo
+.paddlex/
+backend/.paddlex/
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log

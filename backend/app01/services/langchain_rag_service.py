@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 import fitz
 import uuid
 import re
+import os
 import requests
 import statistics
 import pdfplumber
@@ -847,23 +848,19 @@ def extract_text_from_ocr_result(result, min_confidence=0.6):
 
 # 单页 OCR 函数
 def ocr_pdf_page(page):
-    ocr_engine = get_ocr_engine()
+    image_bytes = render_pdf_page_to_image(page)
 
-    if ocr_engine is None:
-        return ''
-
-    image_bytes = render_pdf_page_to_image(page, zoom=2)
-
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
         temp_file.write(image_bytes)
         temp_image_path = temp_file.name
 
     try:
+        ocr_engine = get_ocr_engine()
         result = ocr_engine.ocr(temp_image_path)
+        return extract_text_from_ocr_result(result)
     finally:
-        Path(temp_image_path).unlink(missing_ok=True)
-
-    return extract_text_from_ocr_result(result)
+        if os. path.exists(temp_image_path):
+            os.remove(temp_image_path)
 
 
 def load_pdf_blocks(file_path, base_metadata):

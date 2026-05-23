@@ -47,7 +47,8 @@ urlpatterns = [
     path('safety-issues/<int:report_id>/', views.rest_safety_issue_detail),
     path('projects/<int:project_id>/safety/issues/resolved/', views.rest_safety_resolved_issues),
     path('safety-reports/<int:report_id>/solutions/', views.rest_safety_report_solutions),
-    path('audit-logs/', views.rest_audit_logs),
+    #日志
+    path('audit-logs/search/', views.rest_audit_logs_search),
     #登录
     path('login/', views.login_view, name='login'),
     path('current-user/', views.current_user_view),

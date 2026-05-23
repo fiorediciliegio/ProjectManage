@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import dayjs from 'dayjs';
 import {
   Alert,
@@ -23,24 +23,46 @@ import NavBarRO from '../components/NavBarRO.jsx';
 import { useAuth } from '../hooks/AuthContext';
 import useProjectParams from '../hooks/useProjectParams.js';
 
+const buildOptionsFromLogs = (logs, fieldName) => (
+  Array.from(new Set(logs.map((log) => log[fieldName]).filter(Boolean))).sort()
+);
+
 export default function AuditLogPage() {
   const { projectName } = useProjectParams();
   const { user, logout } = useAuth();
   const [logs, setLogs] = useState([]);
+  const [optionLogs, setOptionLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
   const [dateFilter, setDateFilter] = useState('');
   const [moduleFilter, setModuleFilter] = useState('');
   const [actionFilter, setActionFilter] = useState('');
 
-  useEffect(() => {
-    fetchLogs();
-  }, []);
+  const moduleOptions = useMemo(() => buildOptionsFromLogs(optionLogs, 'module'), [optionLogs]);
+  const actionOptions = useMemo(() => buildOptionsFromLogs(optionLogs, 'action'), [optionLogs]);
+
+  const fetchFilterOptions = async () => {
+    try {
+      const response = await api.get('/audit-logs/search/');
+      setOptionLogs(response.data?.data?.logs || []);
+    } catch (error) {
+      setSnackbar({
+        open: true,
+        message: error.response?.data?.message || '获取日志筛选选项失败',
+      });
+    }
+  };
 
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      const response = await api.get('http://localhost:8000/audit-logs/');
+      const response = await api.get('/audit-logs/search/', {
+        params: {
+          date: dateFilter,
+          module: moduleFilter,
+          action: actionFilter,
+        },
+      });
       setLogs(response.data?.data?.logs || []);
     } catch (error) {
       setSnackbar({
@@ -52,18 +74,17 @@ export default function AuditLogPage() {
     }
   };
 
+  useEffect(() => {
+    fetchFilterOptions();
+  }, []);
+
+  useEffect(() => {
+    fetchLogs();
+  }, [dateFilter, moduleFilter, actionFilter]);
+
   const handleCloseSnackbar = () => {
     setSnackbar({ open: false, message: '' });
   };
-
-  const moduleOptions = Array.from(new Set(logs.map((log) => log.module).filter(Boolean))).sort();
-  const actionOptions = Array.from(new Set(logs.map((log) => log.action).filter(Boolean))).sort();
-  const filteredLogs = logs.filter((log) => {
-    const matchesDate = !dateFilter || (log.created_at || '').startsWith(dateFilter);
-    const matchesModule = !moduleFilter || log.module === moduleFilter;
-    const matchesAction = !actionFilter || log.action === actionFilter;
-    return matchesDate && matchesModule && matchesAction;
-  });
 
   return (
     <Grid container spacing={2}>
@@ -86,7 +107,7 @@ export default function AuditLogPage() {
               <Table stickyHeader aria-label="audit log table">
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ minWidth: 190 }}>
+                    <TableCell sx={{ minWidth: 250 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
                         <Typography variant="body2" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
                           时间
@@ -100,7 +121,7 @@ export default function AuditLogPage() {
                               <TextField
                                 {...params}
                                 size="small"
-                                sx={{ width: 140 }}
+                                sx={{ width: 170 }}
                                 inputProps={{
                                   ...params.inputProps,
                                   placeholder: '',
@@ -112,8 +133,8 @@ export default function AuditLogPage() {
                         </LocalizationProvider>
                       </Box>
                     </TableCell>
-                    <TableCell sx={{ minWidth: 120 }}>操作人</TableCell>
-                    <TableCell sx={{ minWidth: 170 }}>
+                    <TableCell sx={{ minWidth: 150 }}>操作人</TableCell>
+                    <TableCell sx={{ minWidth: 210 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
                         <Typography variant="body2" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
                           模块
@@ -123,7 +144,7 @@ export default function AuditLogPage() {
                           size="small"
                           value={moduleFilter}
                           onChange={(event) => setModuleFilter(event.target.value)}
-                          sx={{ width: 110 }}
+                          sx={{ width: 130 }}
                           SelectProps={{ native: true }}
                           inputProps={{ 'aria-label': '按模块筛选' }}
                         >
@@ -136,7 +157,7 @@ export default function AuditLogPage() {
                         </TextField>
                       </Box>
                     </TableCell>
-                    <TableCell sx={{ minWidth: 190 }}>
+                    <TableCell sx={{ minWidth: 220 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
                         <Typography variant="body2" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
                           操作类型
@@ -146,7 +167,7 @@ export default function AuditLogPage() {
                           size="small"
                           value={actionFilter}
                           onChange={(event) => setActionFilter(event.target.value)}
-                          sx={{ width: 100 }}
+                          sx={{ width: 120 }}
                           SelectProps={{ native: true }}
                           inputProps={{ 'aria-label': '按操作类型筛选' }}
                         >
@@ -159,22 +180,22 @@ export default function AuditLogPage() {
                         </TextField>
                       </Box>
                     </TableCell>
-                    <TableCell sx={{ minWidth: 170 }}>对象名称</TableCell>
+                    <TableCell sx={{ minWidth: 220 }}>对象名称</TableCell>
                     <TableCell>操作描述</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {filteredLogs.map((log) => (
+                  {logs.map((log) => (
                     <TableRow key={log.id} hover>
                       <TableCell>{log.created_at || ''}</TableCell>
-                      <TableCell sx={{ minWidth: 120, whiteSpace: 'nowrap' }}>{log.person_name || log.username || ''}</TableCell>
+                      <TableCell sx={{ minWidth: 150, whiteSpace: 'nowrap' }}>{log.person_name || log.username || ''}</TableCell>
                       <TableCell>{log.module || ''}</TableCell>
                       <TableCell>{log.action || ''}</TableCell>
-                      <TableCell sx={{ minWidth: 170, whiteSpace: 'nowrap' }}>{log.target_name || ''}</TableCell>
+                      <TableCell sx={{ minWidth: 220, whiteSpace: 'nowrap' }}>{log.target_name || ''}</TableCell>
                       <TableCell>{log.description || ''}</TableCell>
                     </TableRow>
                   ))}
-                  {!loading && filteredLogs.length === 0 && (
+                  {!loading && logs.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={6} align="center">
                         暂无操作日志

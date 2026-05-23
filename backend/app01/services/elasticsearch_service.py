@@ -1,11 +1,11 @@
 from django.conf import settings
 from elasticsearch import Elasticsearch, helpers
 
-
+# 接入 ES 服务
 def get_elasticsearch_client():
     return Elasticsearch(settings.ELASTICSEARCH_URL)
 
-
+# ———————————————————— 保存文件 chunk ————————————————————
 def ensure_file_chunk_index():
     client = get_elasticsearch_client()
     index_name = settings.ELASTICSEARCH_INDEX
@@ -198,3 +198,128 @@ def keyword_search_file_chunks(query, project_id=None, limit=20):
         })
 
     return results
+
+# ———————————————————— 保存日志 ————————————————————
+def ensure_audit_log_index():
+    client = get_elasticsearch_client()
+    index_name = settings.AUDIT_LOG_ES_INDEX
+
+    if client.indices.exists(index=index_name):
+        return client
+
+    client.indices.create(
+        index=index_name,
+        mappings={
+            'properties': {
+                'id': {'type': 'integer'},
+                'username': {'type': 'keyword'},
+                'person_name': {'type': 'keyword'},
+                'action': {'type': 'keyword'},
+                'action_display': {'type': 'keyword'},
+                'module': {'type': 'keyword'},
+                'target_id': {'type': 'keyword'},
+                'target_name': {
+                    'type': 'text',
+                    'fields': {
+                        'keyword': {'type': 'keyword'}
+                    },
+                },
+                'description': {'type': 'text'},
+                'created_at': {'type': 'date'},
+            }
+        },
+    )
+    return client
+
+# ES 写入日志
+def index_audit_log(log):
+    client = ensure_audit_log_index()
+    index_name = settings.AUDIT_LOG_ES_INDEX
+
+    document = {
+        'id': log.pk,
+        'username': log.user.username if log.user else '',
+        'person_name': log.person.NAME_Person if log.person else '',
+        'action': log.action,
+        'action_display': log.get_action_display(),
+        'module': log.module,
+        'target_id': str(log.target_id or ''),
+        'target_name': log.target_name or '',
+        'description': log.description or '',
+        'created_at': log.created_at.isoformat(),
+    }
+    client.index(
+        index=index_name,
+        id=log.pk,
+        document=document,
+    )
+
+# ES 搜素函数
+def search_audit_logs(keyword='',module='',action='',date='',size=100):
+    client = ensure_audit_log_index()
+    index_name = settings.AUDIT_LOG_ES_INDEX
+    must = []
+    filter_conditions = []
+
+    if keyword:
+        must.append({
+            'multi_match': {
+                'query': keyword,
+                'fields': [
+                    'username',
+                    'person_name',
+                    'target_name',
+                    'description',
+                ],
+            }
+        })
+    if module:
+        filter_conditions.append({
+            'term': {
+                'module': module,
+            }
+        })
+    if action:
+        filter_conditions.append({
+            'term': {
+                'action_display': action,
+            }
+        })
+    if date:
+        filter_conditions.append({
+            'range': {
+                'created_at': {
+                    'gte': f'{date}T00:00:00',
+                    'lte': f'{date}T23:59:59',
+                }
+            }
+        })
+    query = {
+        'bool': {
+            'must': must or [{'match_all': {}}],
+            'filter': filter_conditions,
+        }
+    }
+    response = client.search(
+        index=index_name,
+        query=query,
+        sort=[
+            {'created_at': {'order': 'desc'}}
+        ],
+        size=size,
+    )
+    logs = []
+    for hit in response['hits']['hits']:
+        source = hit['_source']
+        logs.append({
+            'id': source.get('id'),
+            'username': source.get('username', ''),
+            'person_name': source.get('person_name', ''),
+            'action': source.get('action_display', ''),
+            'module': source.get('module', ''),
+            'target_id': source.get('target_id', ''),
+            'target_name': source.get('target_name', ''),
+            'description': source.get('description', ''),
+            'created_at': source.get('created_at', '').replace('T', ' ')[:19],
+        })
+    return logs

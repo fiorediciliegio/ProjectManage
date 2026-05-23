@@ -45,6 +45,7 @@ from django.db.models import Sum
 from django.db.models.functions import TruncMonth
 from html import escape
 from openpyxl import load_workbook
+from app01.services.elasticsearch_service import search_audit_logs, delete_file_chunks_from_elasticsearch
 from app01.services.langchain_rag_service import (
     index_file_to_qdrant_langchain,
     get_indexed_file_ids,
@@ -280,14 +281,8 @@ def csrf_token_view(request):
 # 创建日志
 def create_audit_log(request, action, module, target_id=None, target_name='', description=''):
     user = request.user if request.user.is_authenticated else None
-    person = None
-    if user:
-        try:
-            person = user.person_profile
-        except Person.DoesNotExist:
-            person = None
-
-    AuditLog.objects.create(
+    person = getattr(user, 'person_profile', None) if user else None
+    log = AuditLog.objects.create(
         user=user,
         person=person,
         action=action,
@@ -296,34 +291,46 @@ def create_audit_log(request, action, module, target_id=None, target_name='', de
         target_name=target_name,
         description=description,
     )
+    try:
+        from app01.services.elasticsearch_service import index_audit_log
+        index_audit_log(log)
+    except Exception as e:
+        print(f'操作日志写入 Elasticsearch 失败：{e}')
+    return log
 
+# ES 查看并操作日志
 @api_view(['GET'])
-def rest_audit_logs(request):
+def rest_audit_logs_search(request):
     person, auth_error = get_authenticated_person(request)
     if auth_error:
         return auth_error
-    # 权限校验
+
     if not is_admin(person):
         return permission_denied('只有管理员可以查看操作日志')
-    logs = AuditLog.objects.all()[:100]
-    data = []
-    for log in logs:
-        data.append({
-            'id': log.pk,
-            'username': log.user.username if log.user else '',
-            'person_name': log.person.NAME_Person if log.person else '',
-            'action': log.get_action_display(),
-            'module': log.module,
-            'target_id': log.target_id,
-            'target_name': log.target_name,
-            'description': log.description,
-            'created_at': log.created_at.strftime('%Y-%m-%d %H:%M:%S'),
-        })
-    return success_response(
-        data={'logs': data},
-        message='获取操作日志成功',
-        status_code=status.HTTP_200_OK,
-    )
+
+    keyword = request.GET.get('keyword', '').strip()
+    module = request.GET.get('module', '').strip()
+    action = request.GET.get('action', '').strip()
+    date = request.GET.get('date', '').strip()
+
+    try:
+        logs = search_audit_logs(
+            keyword=keyword,
+            module=module,
+            action=action,
+            date=date,
+            size=100,
+        )
+        return success_response(
+            data={'logs': logs},
+            message='获取操作日志成功',
+            status_code=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        return error_response(
+            message=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 # ———————————————————— 项目与人员 ————————————————————
 # REST 项目模块：项目列表、详情、新增与删除接口
@@ -2068,6 +2075,9 @@ def rest_files(request, file_id):
             target_name=file_obj.ID_Project.NAME_Project,
             description=f'删除文件：文件名：{file_obj.NAME_File}{file_obj.FORM_File or ""}',
         )
+        # 从 ES 和 Qdrant 中同步删除
+        delete_langchain_file_vectors(file_obj.pk)
+        delete_file_chunks_from_elasticsearch(file_obj.pk)
         file_obj.delete()
         return success_response(
             data=None,
@@ -2202,6 +2212,7 @@ def rag_chat(request, project_id):
             message='请输入问题',
             status_code=status.HTTP_400_BAD_REQUEST,
         )
+
 
     def stream_events():
         try:

@@ -160,8 +160,9 @@ DATABASES = {
 }
 
 # Elasticsearch
-ELASTICSEARCH_URL = os.getenv('ELASTICSEARCH_URL', 'http://localhost:9200')
+ELASTICSEARCH_URL = os.getenv('ELASTICSEARCH_URL', 'http://127.0.0.1:9200')
 ELASTICSEARCH_INDEX = os.getenv('ELASTICSEARCH_INDEX', 'project_file_chunks')
+AUDIT_LOG_ES_INDEX = os.getenv('AUDIT_LOG_ES_INDEX', 'project_audit_logs')
 
 # 向量库 Qdrant
 QDRANT_URL = os.getenv('QDRANT_URL', 'http://127.0.0.1:6333')

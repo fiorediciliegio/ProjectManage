@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Button,
   List,
@@ -436,7 +436,7 @@ export default function FileManager({ projectId }) {
           onChange={handleUpload}
         />
         <Grid item xs={7} sx={{ minWidth: 0 }}>
-          <Paper elevation={3} sx={{ height: 600, width: '100%', overflow: 'auto' }}>
+          <Paper elevation={3} sx={{ height: 'calc(100vh - 160px)', minHeight: 680, width: '100%', overflow: 'auto' }}>
             <List>
               <ListItem sx={{ gap: 2, alignItems: 'center', flexWrap: 'wrap', position: 'sticky', top: 0, zIndex: 2, bgcolor: 'background.paper', borderBottom: '1px solid #eee' }}>
                 <TextField
@@ -528,6 +528,7 @@ export default function FileManager({ projectId }) {
                     )}
                   </Grid>
                 </Box>
+                <Typography variant="body2" color="text.secondary" sx={{ ml: 'auto', mr: 2, whiteSpace: 'nowrap' }}>{'\u6587\u4ef6\u6570\u91cf\uff1a'}{filteredFiles.length}</Typography>
               </ListItem>
               {filteredFiles.map((file) => (
                 <ListItem key={file.file_id} divider>
@@ -557,7 +558,7 @@ export default function FileManager({ projectId }) {
         <Grid item xs={4.6} sx={{ minWidth: 0 }}>
           <Paper
             elevation={3}
-            sx={{ height: 600, width: '100%', p: 2, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}
+            sx={{ height: 'calc(100vh - 160px)', minHeight: 680, width: '100%', p: 2, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}
           >
             <Typography variant="h6" sx={{ mb: 1 }}>{'\u9879\u76ee\u6587\u6863\u95ee\u7b54'}</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>

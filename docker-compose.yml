@@ -1,4 +1,13 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: project-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
   qdrant:
     image: qdrant/qdrant:latest
     container_name: project-qdrant
@@ -31,5 +40,6 @@ services:
       - elasticsearch
 
 volumes:
+  redis_data:
   qdrant_storage:
   elasticsearch_data:

@@ -159,6 +159,22 @@ DATABASES = {
     }
 }
 
+# Celery / Redis
+# Redis is used as the broker and result backend for long-running work such as
+# file indexing, OCR, embedding, and future report jobs. Keeping these jobs out
+# of request threads is the first step toward stable multi-user concurrency.
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0'))
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', os.getenv('REDIS_RESULT_URL', 'redis://127.0.0.1:6379/1'))
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = os.getenv('CELERY_TIMEZONE', 'UTC')
+CELERY_TASK_TRACK_STARTED = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv('CELERY_WORKER_PREFETCH_MULTIPLIER', '1'))
+CELERY_TASK_ACKS_LATE = env_bool('CELERY_TASK_ACKS_LATE', True)
+CELERY_TASK_TIME_LIMIT = int(os.getenv('CELERY_TASK_TIME_LIMIT', '1800'))
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv('CELERY_TASK_SOFT_TIME_LIMIT', '1500'))
+
 # Elasticsearch
 ELASTICSEARCH_URL = os.getenv('ELASTICSEARCH_URL', 'http://127.0.0.1:9200')
 ELASTICSEARCH_INDEX = os.getenv('ELASTICSEARCH_INDEX', 'project_file_chunks')

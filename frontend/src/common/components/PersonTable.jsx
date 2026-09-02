@@ -13,11 +13,13 @@ import MenuItem from "@mui/material/MenuItem";
 import Snackbar from "@mui/material/Snackbar";
 import Alert from "@mui/material/Alert";
 import { useAuth } from "../hooks/AuthContext";
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, emptyPagination, normalizePagination } from "../utils/pagination.js";
 
 const PersonTable = forwardRef((props, ref) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [personInfo, setPersonInfo] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [pagination, setPagination] = useState(emptyPagination());
   const [rows, setRows] = useState([]);
   const [deleteId, setDeleteId] = useState(null);
   const [anchorEl, setAnchorEl] = useState(null);
@@ -26,14 +28,25 @@ const PersonTable = forwardRef((props, ref) => {
   const isManager = Boolean(user);
 
   useEffect(() => {
-    fetchPersonData();
-  }, []);
+    fetchPersonData(personInfo, rowsPerPage);
+  }, [personInfo, rowsPerPage]);
 
-  const fetchPersonData = () => {
+  const fetchPersonData = (page = personInfo, pageSize = rowsPerPage) => {
     axios
-      .get("http://localhost:8000/persons/")
+      .get("http://localhost:8000/persons/", {
+        params: {
+          page: page + 1,
+          page_size: pageSize,
+        },
+      })
       .then((res) => {
         const personList = res.data?.data?.persons || [];
+        const nextPagination = normalizePagination(
+          res.data?.data?.pagination,
+          page,
+          pageSize,
+          personList.length
+        );
         const extractedData = personList.map((item) => ({
           pername: item.pername,
           pernumber: item.pernumber,
@@ -42,6 +55,7 @@ const PersonTable = forwardRef((props, ref) => {
           perid: item.perid,
         }));
         setRows(extractedData);
+        setPagination(nextPagination);
       })
       .catch((error) => {
         console.error("Error fetching data from server", error);
@@ -54,6 +68,14 @@ const PersonTable = forwardRef((props, ref) => {
 
   const handleChangeRowsPerPage = (event) => {
     setRowsPerPage(+event.target.value);
+    setPersonInfo(0);
+  };
+
+  const refreshFirstPage = () => {
+    if (personInfo === 0) {
+      fetchPersonData(0, rowsPerPage);
+      return;
+    }
     setPersonInfo(0);
   };
 
@@ -73,7 +95,7 @@ const PersonTable = forwardRef((props, ref) => {
     axios
       .delete(`http://localhost:8000/persons/${deleteId}/`)
       .then(() => {
-        fetchPersonData();
+        refreshFirstPage();
         handleMenuClose();
       })
       .catch((error) => {
@@ -95,7 +117,7 @@ const PersonTable = forwardRef((props, ref) => {
 
   useImperativeHandle(ref, () => ({
     refreshData() {
-      fetchPersonData();
+      fetchPersonData(personInfo, rowsPerPage);
     },
   }));
 
@@ -123,7 +145,6 @@ const PersonTable = forwardRef((props, ref) => {
           </thead>
           <tbody>
             {filteredRows
-              .slice(personInfo * rowsPerPage, personInfo * rowsPerPage + rowsPerPage)
               .map((row) => (
                 <TableRow
                   hover
@@ -153,9 +174,9 @@ const PersonTable = forwardRef((props, ref) => {
         </Table>
       </TableContainer>
       <TablePagination
-        rowsPerPageOptions={[5, 10, 20]}
+        rowsPerPageOptions={PAGE_SIZE_OPTIONS}
         component="div"
-        count={rows.length}
+        count={pagination.total}
         rowsPerPage={rowsPerPage}
         page={personInfo}
         onPageChange={handleChangePage}

@@ -14,24 +14,41 @@ import {
   MenuItem,
   Snackbar,
   Alert,
+  TablePagination,
 } from '@mui/material';
 import { deepPurple, lightBlue } from '@mui/material/colors';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import axios from '../api/client.js';
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, emptyPagination, normalizePagination } from '../utils/pagination.js';
 
 const PersonList = forwardRef((props, ref) => {
   const [personnel, setPersonnel] = useState([]);
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [pagination, setPagination] = useState(emptyPagination());
   const [expanded, setExpanded] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
   const [selectedPerson, setSelectedPerson] = useState(null);
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
 
-  const fetchData = () => {
+  const fetchData = (targetPage = page, targetPageSize = rowsPerPage) => {
     axios
-      .get(`http://localhost:8000/projects/${props.projectId}/persons/`)
+      .get(`http://localhost:8000/projects/${props.projectId}/persons/`, {
+        params: {
+          page: targetPage + 1,
+          page_size: targetPageSize,
+        },
+      })
       .then((response) => {
         console.log('Personnel data:', response.data);
-        setPersonnel(response.data?.data?.persons || []);
+        const persons = response.data?.data?.persons || [];
+        setPersonnel(persons);
+        setPagination(normalizePagination(
+          response.data?.data?.pagination,
+          targetPage,
+          targetPageSize,
+          persons.length
+        ));
       })
       .catch((error) => {
         console.error('Error fetching personnel data:', error);
@@ -39,12 +56,12 @@ const PersonList = forwardRef((props, ref) => {
   };
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    fetchData(page, rowsPerPage);
+  }, [props.projectId, page, rowsPerPage]);
 
   useImperativeHandle(ref, () => ({
     refreshData() {
-      fetchData();
+      fetchData(page, rowsPerPage);
     },
   }));
 
@@ -72,7 +89,7 @@ const PersonList = forwardRef((props, ref) => {
       axios
         .delete(`http://localhost:8000/projects/${props.projectId}/persons/${selectedPerson.perid}/`)
         .then(() => {
-          setPersonnel(personnel.filter((person) => person.perid !== selectedPerson.perid));
+          fetchData(page, rowsPerPage);
           handleClose();
           if (props.onUpdate) {
             props.onUpdate();
@@ -135,6 +152,22 @@ const PersonList = forwardRef((props, ref) => {
           </Fragment>
         )}
       </List>
+      <TablePagination
+        rowsPerPageOptions={PAGE_SIZE_OPTIONS}
+        component="div"
+        count={pagination.total}
+        rowsPerPage={rowsPerPage}
+        page={page}
+        onPageChange={(event, newPage) => {
+          setExpanded(false);
+          setPage(newPage);
+        }}
+        onRowsPerPageChange={(event) => {
+          setExpanded(false);
+          setRowsPerPage(Number(event.target.value));
+          setPage(0);
+        }}
+      />
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={handleClose}>
         <MenuItem onClick={handleRemovePerson}>移除人员</MenuItem>
       </Menu>

@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from pathlib import Path
 import os
+from kombu import Exchange, Queue
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -77,6 +78,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'app01.middleware.PerformanceLogMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -148,6 +150,12 @@ WSGI_APPLICATION = 'Projectmanagement.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
 
+DB_CONN_MAX_AGE = int(os.getenv('DB_CONN_MAX_AGE', '60'))
+DB_CONN_HEALTH_CHECKS = env_bool('DB_CONN_HEALTH_CHECKS', True)
+DB_CONNECT_TIMEOUT = int(os.getenv('DB_CONNECT_TIMEOUT', '5'))
+DB_READ_TIMEOUT = int(os.getenv('DB_READ_TIMEOUT', '30'))
+DB_WRITE_TIMEOUT = int(os.getenv('DB_WRITE_TIMEOUT', '30'))
+
 DATABASES = {
     'default': {
         'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.mysql'),
@@ -156,6 +164,15 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '3306'),
+        'CONN_MAX_AGE': DB_CONN_MAX_AGE,
+        'CONN_HEALTH_CHECKS': DB_CONN_HEALTH_CHECKS,
+        'OPTIONS': {
+            'charset': 'utf8mb4',
+            'connect_timeout': DB_CONNECT_TIMEOUT,
+            'read_timeout': DB_READ_TIMEOUT,
+            'write_timeout': DB_WRITE_TIMEOUT,
+            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+        },
     }
 }
 
@@ -174,6 +191,85 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv('CELERY_WORKER_PREFETCH_MULTIP
 CELERY_TASK_ACKS_LATE = env_bool('CELERY_TASK_ACKS_LATE', True)
 CELERY_TASK_TIME_LIMIT = int(os.getenv('CELERY_TASK_TIME_LIMIT', '1800'))
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv('CELERY_TASK_SOFT_TIME_LIMIT', '1500'))
+CELERY_TASK_DEFAULT_QUEUE = os.getenv('CELERY_TASK_DEFAULT_QUEUE', 'default')
+CELERY_RAG_INDEX_QUEUE = os.getenv('CELERY_RAG_INDEX_QUEUE', 'rag_index')
+CELERY_RAG_MAINTENANCE_QUEUE = os.getenv('CELERY_RAG_MAINTENANCE_QUEUE', 'rag_maintenance')
+CELERY_MONITORED_QUEUES = env_list(
+    'CELERY_MONITORED_QUEUES',
+    f'{CELERY_TASK_DEFAULT_QUEUE},{CELERY_RAG_INDEX_QUEUE},{CELERY_RAG_MAINTENANCE_QUEUE}',
+)
+CELERY_TASK_DEFAULT_EXCHANGE = CELERY_TASK_DEFAULT_QUEUE
+CELERY_TASK_DEFAULT_ROUTING_KEY = CELERY_TASK_DEFAULT_QUEUE
+CELERY_TASK_CREATE_MISSING_QUEUES = True
+CELERY_TASK_QUEUES = (
+    Queue(CELERY_TASK_DEFAULT_QUEUE, Exchange(CELERY_TASK_DEFAULT_QUEUE), routing_key=CELERY_TASK_DEFAULT_QUEUE),
+    Queue(CELERY_RAG_INDEX_QUEUE, Exchange(CELERY_RAG_INDEX_QUEUE), routing_key=CELERY_RAG_INDEX_QUEUE),
+    Queue(CELERY_RAG_MAINTENANCE_QUEUE, Exchange(CELERY_RAG_MAINTENANCE_QUEUE), routing_key=CELERY_RAG_MAINTENANCE_QUEUE),
+)
+CELERY_TASK_ROUTES = {
+    'app01.tasks.celery_health_check': {
+        'queue': CELERY_TASK_DEFAULT_QUEUE,
+        'routing_key': CELERY_TASK_DEFAULT_QUEUE,
+    },
+    'app01.tasks.rag_index_file_task': {
+        'queue': CELERY_RAG_INDEX_QUEUE,
+        'routing_key': CELERY_RAG_INDEX_QUEUE,
+    },
+    'app01.tasks.rag_delete_file_vectors_task': {
+        'queue': CELERY_RAG_MAINTENANCE_QUEUE,
+        'routing_key': CELERY_RAG_MAINTENANCE_QUEUE,
+    },
+    'app01.tasks.rag_finalize_file_index_cancel_task': {
+        'queue': CELERY_RAG_MAINTENANCE_QUEUE,
+        'routing_key': CELERY_RAG_MAINTENANCE_QUEUE,
+    },
+}
+CELERY_RAG_INDEX_RATE_LIMIT = os.getenv('CELERY_RAG_INDEX_RATE_LIMIT', '')
+if CELERY_RAG_INDEX_RATE_LIMIT:
+    CELERY_TASK_ANNOTATIONS = {
+        'app01.tasks.rag_index_file_task': {
+            'rate_limit': CELERY_RAG_INDEX_RATE_LIMIT,
+        },
+    }
+RAG_INDEX_MAX_RETRIES = int(os.getenv('RAG_INDEX_MAX_RETRIES', '3'))
+RAG_INDEX_RETRY_BASE_DELAY = int(os.getenv('RAG_INDEX_RETRY_BASE_DELAY', '30'))
+RAG_INDEX_RETRY_MAX_DELAY = int(os.getenv('RAG_INDEX_RETRY_MAX_DELAY', '300'))
+
+# Redis cache
+CACHE_URL = os.getenv('CACHE_URL', 'redis://127.0.0.1:6379/2')
+CACHE_KEY_PREFIX = os.getenv('CACHE_KEY_PREFIX', 'projectmanage')
+CACHE_DEFAULT_TIMEOUT = int(os.getenv('CACHE_DEFAULT_TIMEOUT', '300'))
+API_CACHE_ENABLED = env_bool('API_CACHE_ENABLED', True)
+API_CACHE_TTL_PROJECT_LIST = int(os.getenv('API_CACHE_TTL_PROJECT_LIST', '60'))
+API_CACHE_TTL_PROJECT_DETAIL = int(os.getenv('API_CACHE_TTL_PROJECT_DETAIL', '60'))
+API_CACHE_TTL_PROJECT_NODES = int(os.getenv('API_CACHE_TTL_PROJECT_NODES', '30'))
+API_CACHE_TTL_PROJECT_PERSONS = int(os.getenv('API_CACHE_TTL_PROJECT_PERSONS', '60'))
+API_CACHE_TTL_PROJECT_COSTS = int(os.getenv('API_CACHE_TTL_PROJECT_COSTS', '30'))
+API_CACHE_TTL_PROJECT_FILES = int(os.getenv('API_CACHE_TTL_PROJECT_FILES', '10'))
+API_DEFAULT_PAGE_SIZE = int(os.getenv('API_DEFAULT_PAGE_SIZE', '50'))
+API_MAX_PAGE_SIZE = int(os.getenv('API_MAX_PAGE_SIZE', '100'))
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': CACHE_URL,
+        'KEY_PREFIX': CACHE_KEY_PREFIX,
+        'TIMEOUT': CACHE_DEFAULT_TIMEOUT,
+    }
+}
+
+# Performance logging
+# Enabled by default in local DEBUG mode. It forces Django SQL query logging only
+# for selected API paths so load tests can expose slow requests and N+1 queries.
+PERF_LOG_ENABLED = env_bool('PERF_LOG_ENABLED', DEBUG)
+PERF_SLOW_REQUEST_MS = int(os.getenv('PERF_SLOW_REQUEST_MS', '500'))
+PERF_SLOW_QUERY_MS = int(os.getenv('PERF_SLOW_QUERY_MS', '100'))
+PERF_QUERY_WARN_COUNT = int(os.getenv('PERF_QUERY_WARN_COUNT', '30'))
+PERF_LOG_SAMPLE_RATE = float(os.getenv('PERF_LOG_SAMPLE_RATE', '1.0'))
+PERF_LOG_PATH_PREFIXES = tuple(env_list(
+    'PERF_LOG_PATH_PREFIXES',
+    '/projects/,/files/,/login/,/csrf/',
+))
 
 # Elasticsearch
 ELASTICSEARCH_URL = os.getenv('ELASTICSEARCH_URL', 'http://127.0.0.1:9200')
@@ -189,16 +285,62 @@ LANGCHAIN_QDRANT_COLLECTION = os.getenv('LANGCHAIN_QDRANT_COLLECTION', 'project_
 EMBEDDING_PROVIDER = os.getenv('EMBEDDING_PROVIDER', 'llama_cpp')
 EMBEDDING_BASE_URL = os.getenv('EMBEDDING_BASE_URL', 'http://127.0.0.1:8080/v1')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'Qwen3-Embedding-4B-GGUF')
+EMBEDDING_BATCH_SIZE = int(os.getenv('EMBEDDING_BATCH_SIZE', '8'))
+VECTOR_UPSERT_BATCH_SIZE = int(os.getenv('VECTOR_UPSERT_BATCH_SIZE', '16'))
 
 # RAG 回答模型
 RAG_CHAT_BASE_URL = os.getenv('RAG_CHAT_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
 RAG_CHAT_API_KEY = os.getenv('DASHSCOPE_API_KEY', '')
-RAG_CHAT_MODEL = os.getenv('RAG_CHAT_MODEL', 'qwen3.6-plus')
+RAG_CHAT_MODEL = os.getenv('RAG_CHAT_MODEL', 'qwen3.7-flash')
+RAG_CHAT_TIMEOUT = int(os.getenv('RAG_CHAT_TIMEOUT', '45'))
+RAG_CHAT_RATE_LIMIT_ENABLED = env_bool('RAG_CHAT_RATE_LIMIT_ENABLED', True)
+RAG_CHAT_RATE_WINDOW_SECONDS = int(os.getenv('RAG_CHAT_RATE_WINDOW_SECONDS', '60'))
+RAG_CHAT_USER_RATE_LIMIT_PER_MINUTE = int(os.getenv('RAG_CHAT_USER_RATE_LIMIT_PER_MINUTE', '12'))
+RAG_CHAT_PROJECT_RATE_LIMIT_PER_MINUTE = int(os.getenv('RAG_CHAT_PROJECT_RATE_LIMIT_PER_MINUTE', '60'))
+RAG_CHAT_GLOBAL_RATE_LIMIT_PER_MINUTE = int(os.getenv('RAG_CHAT_GLOBAL_RATE_LIMIT_PER_MINUTE', '120'))
+RAG_CHAT_USER_MAX_IN_FLIGHT = int(os.getenv('RAG_CHAT_USER_MAX_IN_FLIGHT', '2'))
+RAG_CHAT_GLOBAL_MAX_IN_FLIGHT = int(os.getenv('RAG_CHAT_GLOBAL_MAX_IN_FLIGHT', '8'))
+RAG_CHAT_IN_FLIGHT_TTL = int(os.getenv('RAG_CHAT_IN_FLIGHT_TTL', '300'))
+RAG_CHAT_HISTORY_MAX_MESSAGES = int(os.getenv('RAG_CHAT_HISTORY_MAX_MESSAGES', '10'))
+RAG_CHAT_RECENT_MESSAGES = int(os.getenv('RAG_CHAT_RECENT_MESSAGES', str(RAG_CHAT_HISTORY_MAX_MESSAGES)))
+RAG_CHAT_SUMMARY_MAX_MESSAGES = int(os.getenv('RAG_CHAT_SUMMARY_MAX_MESSAGES', '70'))
+RAG_CHAT_SUMMARY_TRIGGER_MESSAGES = int(os.getenv('RAG_CHAT_SUMMARY_TRIGGER_MESSAGES', str(RAG_CHAT_RECENT_MESSAGES)))
+RAG_CHAT_SUMMARY_UPDATE_INTERVAL_MESSAGES = int(os.getenv('RAG_CHAT_SUMMARY_UPDATE_INTERVAL_MESSAGES', '4'))
+RAG_CHAT_SUMMARY_SOURCE_MESSAGE_CHARS = int(os.getenv('RAG_CHAT_SUMMARY_SOURCE_MESSAGE_CHARS', '500'))
+RAG_CHAT_SUMMARY_MAX_CHARS = int(os.getenv('RAG_CHAT_SUMMARY_MAX_CHARS', '2500'))
+RAG_MULTI_QUERY_ENABLED = env_bool('RAG_MULTI_QUERY_ENABLED', True)
+RAG_MULTI_QUERY_COUNT = int(os.getenv('RAG_MULTI_QUERY_COUNT', '3'))
+RAG_MULTI_QUERY_RECALL_LIMIT = int(os.getenv('RAG_MULTI_QUERY_RECALL_LIMIT', '30'))
+RAG_MULTI_QUERY_MAX_QUERY_CHARS = int(os.getenv('RAG_MULTI_QUERY_MAX_QUERY_CHARS', '180'))
+RAG_RERANK_CANDIDATE_LIMIT = int(os.getenv('RAG_RERANK_CANDIDATE_LIMIT', '32'))
+RAG_MODEL_RERANK_CANDIDATE_LIMIT = int(os.getenv('RAG_MODEL_RERANK_CANDIDATE_LIMIT', '24'))
+RAG_CONTEXT_COMPRESSION_ENABLED = env_bool('RAG_CONTEXT_COMPRESSION_ENABLED', True)
+RAG_CONTEXT_COMPRESSION_CANDIDATE_LIMIT = int(os.getenv('RAG_CONTEXT_COMPRESSION_CANDIDATE_LIMIT', '16'))
+RAG_CONTEXT_COMPRESSION_MIN_KEEP_ITEMS = int(os.getenv('RAG_CONTEXT_COMPRESSION_MIN_KEEP_ITEMS', '6'))
+RAG_CONTEXT_COMPRESSION_MAX_ITEM_CHARS = int(os.getenv('RAG_CONTEXT_COMPRESSION_MAX_ITEM_CHARS', '900'))
+RAG_CONTEXT_COMPRESSION_MAX_SENTENCES = int(os.getenv('RAG_CONTEXT_COMPRESSION_MAX_SENTENCES', '6'))
+RAG_CONTEXT_COMPRESSION_SENTENCE_WINDOW = int(os.getenv('RAG_CONTEXT_COMPRESSION_SENTENCE_WINDOW', '1'))
+RAG_CONTEXT_COMPRESSION_DROP_UNMATCHED_AFTER_MIN_KEEP = env_bool(
+    'RAG_CONTEXT_COMPRESSION_DROP_UNMATCHED_AFTER_MIN_KEEP',
+    False,
+)
+RAG_LLM_CONTEXT_COMPRESSION_ENABLED = env_bool('RAG_LLM_CONTEXT_COMPRESSION_ENABLED', True)
+RAG_LLM_CONTEXT_COMPRESSION_MODEL = os.getenv('RAG_LLM_CONTEXT_COMPRESSION_MODEL', RAG_CHAT_MODEL)
+RAG_LLM_CONTEXT_COMPRESSION_CANDIDATE_LIMIT = int(os.getenv('RAG_LLM_CONTEXT_COMPRESSION_CANDIDATE_LIMIT', '5'))
+RAG_LLM_CONTEXT_COMPRESSION_MIN_ITEM_CHARS = int(os.getenv('RAG_LLM_CONTEXT_COMPRESSION_MIN_ITEM_CHARS', '350'))
+RAG_LLM_CONTEXT_COMPRESSION_MAX_ITEM_CHARS = int(os.getenv('RAG_LLM_CONTEXT_COMPRESSION_MAX_ITEM_CHARS', '700'))
+RAG_CONTEXT_COMPRESSION_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv('RAG_CONTEXT_COMPRESSION_CIRCUIT_FAILURE_THRESHOLD', '2'))
+RAG_CONTEXT_COMPRESSION_CIRCUIT_OPEN_SECONDS = int(os.getenv('RAG_CONTEXT_COMPRESSION_CIRCUIT_OPEN_SECONDS', '60'))
+RAG_CIRCUIT_BREAKER_ENABLED = env_bool('RAG_CIRCUIT_BREAKER_ENABLED', True)
+RAG_CHAT_MODEL_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv('RAG_CHAT_MODEL_CIRCUIT_FAILURE_THRESHOLD', '3'))
+RAG_CHAT_MODEL_CIRCUIT_OPEN_SECONDS = int(os.getenv('RAG_CHAT_MODEL_CIRCUIT_OPEN_SECONDS', '60'))
+RAG_RERANK_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv('RAG_RERANK_CIRCUIT_FAILURE_THRESHOLD', '3'))
+RAG_RERANK_CIRCUIT_OPEN_SECONDS = int(os.getenv('RAG_RERANK_CIRCUIT_OPEN_SECONDS', '60'))
 
 # RAG Rerank 模型
 RAG_RERANK_BASE_URL = os.getenv(
     'RAG_RERANK_BASE_URL',
-    'https://dashscope.aliyuncs.com/compatible-api/v1',
+    'https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank',
 )
 RAG_RERANK_API_KEY = os.getenv('DASHSCOPE_API_KEY', '')
 RAG_RERANK_MODEL = os.getenv('RAG_RERANK_MODEL', 'qwen3-rerank')
@@ -247,3 +389,37 @@ STATIC_URL = '/static/'
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {
+            'format': '[{asctime}] {levelname} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+    },
+    'loggers': {
+        'app01.performance': {
+            'handlers': ['console'],
+            'level': os.getenv('PERF_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+        'app01.cache': {
+            'handlers': ['console'],
+            'level': os.getenv('CACHE_LOG_LEVEL', 'WARNING'),
+            'propagate': False,
+        },
+        'app01.rag_resilience': {
+            'handlers': ['console'],
+            'level': os.getenv('RAG_RESILIENCE_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+    },
+}

@@ -95,6 +95,36 @@ class AuditLog(models.Model):
 
 #文件表
 class File(models.Model):
+    INDEX_STATUS_CHOICES = [
+        ('not_indexed', '未入库'),
+        ('queued', '排队中'),
+        ('running', '入库中'),
+        ('retrying', '正在重试'),
+        ('cancelling', '取消中'),
+        ('completed', '已入库'),
+        ('failed', '入库失败'),
+        ('deleting', '删除中'),
+        ('cancelled', '已取消'),
+    ]
+    INDEX_STAGE_CHOICES = [
+        ('idle', '空闲'),
+        ('queued', '任务已排队'),
+        ('prepare', '准备任务'),
+        ('retry_wait', '等待重试'),
+        ('cancel_requested', '取消请求已提交'),
+        ('cancelled', '任务已取消'),
+        ('cleanup', '清理旧索引'),
+        ('parse', '解析文件'),
+        ('split', '切分文本'),
+        ('qdrant_connect', '连接向量库'),
+        ('embedding', '生成向量'),
+        ('qdrant_upsert', '写入向量库'),
+        ('elasticsearch_index', '写入关键词索引'),
+        ('delete_vectors', '删除向量索引'),
+        ('completed', '任务完成'),
+        ('failed', '任务失败'),
+    ]
+
     FILE = models.FileField(upload_to='uploads/')
     NAME_File = models.CharField(max_length=255)
     SIZE_File = models.IntegerField()
@@ -109,6 +139,66 @@ class File(models.Model):
         related_name='uploaded_files',
         verbose_name='上传人'
     )
+    INDEX_STATUS_File = models.CharField(max_length=20, choices=INDEX_STATUS_CHOICES, default='not_indexed')
+    INDEX_TASK_ID_File = models.CharField(max_length=255, null=True, blank=True)
+    INDEX_STAGE_File = models.CharField(max_length=50, choices=INDEX_STAGE_CHOICES, default='idle')
+    INDEX_ERROR_File = models.TextField(null=True, blank=True)
+    INDEX_ERROR_TYPE_File = models.CharField(max_length=120, null=True, blank=True)
+    INDEX_ERROR_DETAIL_File = models.TextField(null=True, blank=True)
+    INDEX_RETRY_COUNT_File = models.PositiveSmallIntegerField(default=0)
+    INDEX_MAX_RETRIES_File = models.PositiveSmallIntegerField(default=3)
+    INDEX_NEXT_RETRY_AT_File = models.DateTimeField(null=True, blank=True)
+    INDEX_RETRYABLE_File = models.BooleanField(default=False)
+    INDEX_CANCEL_REQUESTED_File = models.BooleanField(default=False)
+    INDEX_CANCELLED_AT_File = models.DateTimeField(null=True, blank=True)
+    INDEXED_AT_File = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['INDEX_STATUS_File'], name='file_idx_status'),
+            models.Index(fields=['INDEX_STAGE_File'], name='file_idx_stage'),
+            models.Index(fields=['ID_Project', 'INDEX_STATUS_File'], name='file_proj_idx_status'),
+        ]
+
+
+class RagChatSession(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='rag_chat_sessions')
+    owner = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='rag_chat_sessions')
+    title = models.CharField(max_length=120, default='新的文档问答')
+    memory_summary = models.TextField(default='', blank=True)
+    summarized_message_count = models.PositiveIntegerField(default=0)
+    summary_updated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_message_at = models.DateTimeField(null=True, blank=True)
+    message_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['-last_message_at', '-updated_at']
+        indexes = [
+            models.Index(fields=['project', 'owner', '-updated_at'], name='rag_sess_project_owner'),
+            models.Index(fields=['project', '-last_message_at'], name='rag_sess_project_last'),
+        ]
+
+
+class RagChatMessage(models.Model):
+    ROLE_CHOICES = [
+        ('user', '用户'),
+        ('assistant', '助手'),
+    ]
+
+    session = models.ForeignKey(RagChatSession, on_delete=models.CASCADE, related_name='messages')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    content = models.TextField()
+    sources_json = models.JSONField(default=list, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        indexes = [
+            models.Index(fields=['session', 'created_at'], name='rag_msg_session_time'),
+        ]
 
 #质检模板表
 class QualityInspectionTemplate(models.Model):

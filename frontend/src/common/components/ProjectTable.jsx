@@ -13,11 +13,13 @@ import MenuItem from "@mui/material/MenuItem";
 import Snackbar from "@mui/material/Snackbar";
 import Alert from "@mui/material/Alert";
 import { useAuth } from "../hooks/AuthContext";
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, emptyPagination, normalizePagination } from "../utils/pagination.js";
 
 const ProjectTable = forwardRef((props, ref) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [projectInfo, setProjectInfo] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [pagination, setPagination] = useState(emptyPagination());
   const [rows, setRows] = useState([]);
   const [deleteId, setDeleteId] = useState(null);
   const [anchorEl, setAnchorEl] = useState(null);
@@ -26,14 +28,25 @@ const ProjectTable = forwardRef((props, ref) => {
   const isManager = Boolean(user);
 
   useEffect(() => {
-    fetchProjectData();
-  }, []);
+    fetchProjectData(projectInfo, rowsPerPage);
+  }, [projectInfo, rowsPerPage]);
 
-  const fetchProjectData = () => {
+  const fetchProjectData = (page = projectInfo, pageSize = rowsPerPage) => {
     axios
-      .get("http://localhost:8000/projects/")
+      .get("http://localhost:8000/projects/", {
+        params: {
+          page: page + 1,
+          page_size: pageSize,
+        },
+      })
       .then((res) => {
         const projectList = res.data?.data?.projects || [];
+        const nextPagination = normalizePagination(
+          res.data?.data?.pagination,
+          page,
+          pageSize,
+          projectList.length
+        );
         const extractedData = projectList.map((item) => ({
           pjname: item.pjname,
           pjnumber: item.pjnumber,
@@ -42,6 +55,7 @@ const ProjectTable = forwardRef((props, ref) => {
           pjid: item.pjid,
         }));
         setRows(extractedData);
+        setPagination(nextPagination);
       })
       .catch((error) => {
         console.error("Error fetching data from server", error);
@@ -54,6 +68,14 @@ const ProjectTable = forwardRef((props, ref) => {
 
   const handleChangeRowsPerPage = (event) => {
     setRowsPerPage(+event.target.value);
+    setProjectInfo(0);
+  };
+
+  const refreshFirstPage = () => {
+    if (projectInfo === 0) {
+      fetchProjectData(0, rowsPerPage);
+      return;
+    }
     setProjectInfo(0);
   };
 
@@ -77,7 +99,7 @@ const ProjectTable = forwardRef((props, ref) => {
     axios
       .delete(`http://localhost:8000/projects/${deleteId}/`)
       .then(() => {
-        fetchProjectData();
+        refreshFirstPage();
         handleMenuClose();
       })
       .catch((error) => {
@@ -99,7 +121,7 @@ const ProjectTable = forwardRef((props, ref) => {
 
   useImperativeHandle(ref, () => ({
     refreshData() {
-      fetchProjectData();
+      fetchProjectData(projectInfo, rowsPerPage);
     },
   }));
 
@@ -127,7 +149,6 @@ const ProjectTable = forwardRef((props, ref) => {
           </thead>
           <tbody>
             {filteredRows
-              .slice(projectInfo * rowsPerPage, projectInfo * rowsPerPage + rowsPerPage)
               .map((row) => (
                 <TableRow
                   hover
@@ -158,9 +179,9 @@ const ProjectTable = forwardRef((props, ref) => {
         </Table>
       </TableContainer>
       <TablePagination
-        rowsPerPageOptions={[5, 10, 20]}
+        rowsPerPageOptions={PAGE_SIZE_OPTIONS}
         component="div"
-        count={rows.length}
+        count={pagination.total}
         rowsPerPage={rowsPerPage}
         page={projectInfo}
         onPageChange={handleChangePage}

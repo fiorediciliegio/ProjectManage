@@ -4,6 +4,7 @@ import {
   Table,
   TableCell,
   TableContainer,
+  TablePagination,
   Grid,
   TableRow,
   Box,
@@ -23,6 +24,7 @@ import CreateCost from '../popups/CreateCost';
 import EditCost from '../popups/EditCost';
 import OpenButton from '../components/OpenButton.jsx';
 import Axios from '../api/client.js';
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, emptyPagination, normalizePagination } from '../utils/pagination.js';
 
 const columns = [
   { id: 'name', label: '成本名称', minWidth: 170 },
@@ -32,6 +34,9 @@ const columns = [
 export default function CostTable({ projectId, projectName, onUpdate }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [rows, setRows] = useState([]);
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [pagination, setPagination] = useState(emptyPagination());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -41,11 +46,27 @@ export default function CostTable({ projectId, projectName, onUpdate }) {
   const [contextMenu, setContextMenu] = useState(null);
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
 
-  const fetchCostData = async (targetProjectId) => {
+  const fetchCostData = async (
+    targetProjectId = projectId,
+    targetPage = page,
+    targetPageSize = rowsPerPage
+  ) => {
     try {
       setLoading(true);
-      const res = await Axios.get(`http://localhost:8000/projects/${targetProjectId}/costs/`);
-      setRows(res.data?.data?.costs || []);
+      const res = await Axios.get(`http://localhost:8000/projects/${targetProjectId}/costs/`, {
+        params: {
+          page: targetPage + 1,
+          page_size: targetPageSize,
+        },
+      });
+      const costs = res.data?.data?.costs || [];
+      setRows(costs);
+      setPagination(normalizePagination(
+        res.data?.data?.pagination,
+        targetPage,
+        targetPageSize,
+        costs.length
+      ));
       setError(null);
     } catch (err) {
       setError(err.response?.data?.message || '获取成本单列表失败');
@@ -55,8 +76,16 @@ export default function CostTable({ projectId, projectName, onUpdate }) {
   };
 
   useEffect(() => {
-    fetchCostData(projectId);
-  }, [projectId]);
+    fetchCostData(projectId, page, rowsPerPage);
+  }, [projectId, page, rowsPerPage]);
+
+  const refreshFirstPage = () => {
+    if (page === 0) {
+      fetchCostData(projectId, 0, rowsPerPage);
+      return;
+    }
+    setPage(0);
+  };
 
   const openCreateCost = () => {
     setIsCreatCostOpen(true);
@@ -64,7 +93,7 @@ export default function CostTable({ projectId, projectName, onUpdate }) {
 
   const closeCreateCost = () => {
     setIsCreatCostOpen(false);
-    fetchCostData(projectId);
+    refreshFirstPage();
     if (onUpdate) {
       onUpdate();
     }
@@ -96,7 +125,7 @@ export default function CostTable({ projectId, projectName, onUpdate }) {
   };
 
   const handleEditCostUpdated = () => {
-    fetchCostData(projectId);
+    fetchCostData(projectId, page, rowsPerPage);
     if (onUpdate) {
       onUpdate();
     }
@@ -137,7 +166,7 @@ export default function CostTable({ projectId, projectName, onUpdate }) {
       await Axios.delete(`http://localhost:8000/costs/${selectedCost.costId}/`);
       handleContextMenuClose();
       setSelectedCost(null);
-      fetchCostData(projectId);
+      refreshFirstPage();
       if (onUpdate) {
         onUpdate();
       }
@@ -223,6 +252,18 @@ export default function CostTable({ projectId, projectName, onUpdate }) {
                 </tbody>
               </Table>
             </TableContainer>
+            <TablePagination
+              rowsPerPageOptions={PAGE_SIZE_OPTIONS}
+              component="div"
+              count={pagination.total}
+              rowsPerPage={rowsPerPage}
+              page={page}
+              onPageChange={(event, newPage) => setPage(newPage)}
+              onRowsPerPageChange={(event) => {
+                setRowsPerPage(Number(event.target.value));
+                setPage(0);
+              }}
+            />
           </Grid>
         </Grid>
 

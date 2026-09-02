@@ -14,6 +14,7 @@ import {
   IconButton,
   Snackbar,
   Alert,
+  TablePagination,
 } from "@mui/material";
 import { Timeline } from "antd";
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
@@ -25,9 +26,13 @@ import MoreVertIcon from '@mui/icons-material/MoreVert';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import { useAuth } from '../hooks/AuthContext';
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, emptyPagination, normalizePagination } from '../utils/pagination.js';
 
 export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
   const [events, setEvents] = useState([]);
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [pagination, setPagination] = useState(emptyPagination());
   const [open, setOpen] = useState(false);
   const [newEvent, setNewEvent] = useState("");
   const [newEventDescription, setNewEventDescription] = useState("");
@@ -49,12 +54,23 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
     return matchesName && matchesStatus;
   });
 
-  const fetchEvents = () => {
+  const fetchEvents = (targetPage = page, targetPageSize = rowsPerPage) => {
     if (!pjID) return;
     axios
-      .get(`http://localhost:8000/projects/${pjID}/nodes/`)
+      .get(`http://localhost:8000/projects/${pjID}/nodes/`, {
+        params: {
+          page: targetPage + 1,
+          page_size: targetPageSize,
+        },
+      })
       .then((res) => {
         const projectNodes = res.data?.data?.project_nodes || [];
+        setPagination(normalizePagination(
+          res.data?.data?.pagination,
+          targetPage,
+          targetPageSize,
+          projectNodes.length
+        ));
         const eventData = projectNodes.map((node) => ({
           eventid: node.pjn_id,
           eventname: node.pjn_name,
@@ -71,8 +87,16 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
   };
 
   useEffect(() => {
-    fetchEvents();
-  }, [pjID]);
+    fetchEvents(page, rowsPerPage);
+  }, [pjID, page, rowsPerPage]);
+
+  const refreshFirstPage = () => {
+    if (page === 0) {
+      fetchEvents(0, rowsPerPage);
+      return;
+    }
+    setPage(0);
+  };
 
   const handleOpenDialog = () => {
     setOpen(true);
@@ -88,7 +112,7 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
     setNewEventDescription("");
     setNewEventDate(null);
     setNewEventStatus('未处理');
-    fetchEvents();
+    refreshFirstPage();
     if (onTimelineUpdate) {
       onTimelineUpdate();
     }
@@ -110,7 +134,6 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
     try {
       await axios.post("http://localhost:8000/project-nodes/", newEventData);
       handleCloseDialog();
-      fetchEvents();
     } catch (error) {
       console.error("Error saving event:", error);
       setSnackbar({
@@ -133,7 +156,7 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
   const handleDelete = async () => {
     try {
       await axios.delete(`http://localhost:8000/project-nodes/${selectedNodeId}/`);
-      fetchEvents();
+      fetchEvents(page, rowsPerPage);
       if (onTimelineUpdate) {
         onTimelineUpdate();
       }
@@ -152,7 +175,7 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
       .patch(`http://localhost:8000/project-nodes/${selectedNodeId}/`, { pjn_status: newStatus })
       .then(() => {
         handleMenuClose();
-        fetchEvents();
+        fetchEvents(page, rowsPerPage);
         if (onTimelineUpdate) {
           onTimelineUpdate();
         }
@@ -224,6 +247,19 @@ export default function TimeLineWithAdd({ pjID, onTimelineUpdate }) {
           ))}
         </Timeline>
       </Grid>
+      <TablePagination
+        rowsPerPageOptions={PAGE_SIZE_OPTIONS}
+        component="div"
+        count={pagination.total}
+        rowsPerPage={rowsPerPage}
+        page={page}
+        onPageChange={(event, newPage) => setPage(newPage)}
+        onRowsPerPageChange={(event) => {
+          setRowsPerPage(Number(event.target.value));
+          setPage(0);
+        }}
+        sx={{ alignSelf: 'stretch' }}
+      />
       {isManager && (
         <Grid item container justifyContent="flex-end">
           <IconButton onClick={handleOpenDialog}>

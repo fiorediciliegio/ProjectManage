@@ -14,6 +14,8 @@ from .models import (
     SecurityCheckResult,
     SecurityInspectionImage,
     SafetyIssueSolution,
+    RagChatSession,
+    RagChatMessage,
 )
 
 
@@ -84,16 +86,101 @@ class FileSerializer(serializers.ModelSerializer):
     file_format = serializers.CharField(source='FORM_File', read_only=True)
     upload_time = serializers.SerializerMethodField()
     uploader_name = serializers.SerializerMethodField()
+    index_status = serializers.CharField(source='INDEX_STATUS_File', read_only=True)
+    index_task_id = serializers.CharField(source='INDEX_TASK_ID_File', read_only=True)
+    index_stage = serializers.CharField(source='INDEX_STAGE_File', read_only=True)
+    index_stage_label = serializers.CharField(source='get_INDEX_STAGE_File_display', read_only=True)
+    index_error = serializers.CharField(source='INDEX_ERROR_File', read_only=True)
+    index_error_type = serializers.CharField(source='INDEX_ERROR_TYPE_File', read_only=True)
+    index_error_detail = serializers.CharField(source='INDEX_ERROR_DETAIL_File', read_only=True)
+    index_retry_count = serializers.IntegerField(source='INDEX_RETRY_COUNT_File', read_only=True)
+    index_max_retries = serializers.IntegerField(source='INDEX_MAX_RETRIES_File', read_only=True)
+    index_next_retry_at = serializers.SerializerMethodField()
+    index_retryable = serializers.BooleanField(source='INDEX_RETRYABLE_File', read_only=True)
+    index_cancel_requested = serializers.BooleanField(source='INDEX_CANCEL_REQUESTED_File', read_only=True)
+    index_cancelled_at = serializers.SerializerMethodField()
+    indexed_at = serializers.SerializerMethodField()
 
     class Meta:
         model = File
-        fields = ['file_id', 'file_name', 'file_size', 'file_format', 'upload_time', 'uploader_name']
+        fields = [
+            'file_id',
+            'file_name',
+            'file_size',
+            'file_format',
+            'upload_time',
+            'uploader_name',
+            'index_status',
+            'index_task_id',
+            'index_stage',
+            'index_stage_label',
+            'index_error',
+            'index_error_type',
+            'index_error_detail',
+            'index_retry_count',
+            'index_max_retries',
+            'index_next_retry_at',
+            'index_retryable',
+            'index_cancel_requested',
+            'index_cancelled_at',
+            'indexed_at',
+        ]
 
     def get_upload_time(self, obj):
         return obj.UPTIME_File.strftime('%Y-%m-%d %H:%M:%S')
 
     def get_uploader_name(self, obj):
         return obj.UPLOADER_Person.NAME_Person if obj.UPLOADER_Person else ''
+
+    def get_indexed_at(self, obj):
+        return obj.INDEXED_AT_File.strftime('%Y-%m-%d %H:%M:%S') if obj.INDEXED_AT_File else None
+
+    def get_index_next_retry_at(self, obj):
+        return obj.INDEX_NEXT_RETRY_AT_File.strftime('%Y-%m-%d %H:%M:%S') if obj.INDEX_NEXT_RETRY_AT_File else None
+
+    def get_index_cancelled_at(self, obj):
+        return obj.INDEX_CANCELLED_AT_File.strftime('%Y-%m-%d %H:%M:%S') if obj.INDEX_CANCELLED_AT_File else None
+
+
+class RagChatMessageSerializer(serializers.ModelSerializer):
+    message_id = serializers.IntegerField(source='id', read_only=True)
+    sources = serializers.JSONField(source='sources_json', read_only=True)
+    metadata = serializers.JSONField(source='metadata_json', read_only=True)
+
+    class Meta:
+        model = RagChatMessage
+        fields = [
+            'message_id',
+            'role',
+            'content',
+            'sources',
+            'metadata',
+            'created_at',
+        ]
+
+
+class RagChatSessionSerializer(serializers.ModelSerializer):
+    session_id = serializers.IntegerField(source='id', read_only=True)
+    project_id = serializers.IntegerField(read_only=True)
+    owner_id = serializers.IntegerField(read_only=True)
+    owner_name = serializers.CharField(source='owner.NAME_Person', read_only=True)
+
+    class Meta:
+        model = RagChatSession
+        fields = [
+            'session_id',
+            'project_id',
+            'owner_id',
+            'owner_name',
+            'title',
+            'message_count',
+            'memory_summary',
+            'summarized_message_count',
+            'summary_updated_at',
+            'created_at',
+            'updated_at',
+            'last_message_at',
+        ]
 
 
 class CostInformationSerializer(serializers.ModelSerializer):

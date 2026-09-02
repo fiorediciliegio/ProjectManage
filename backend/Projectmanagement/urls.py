@@ -67,8 +67,12 @@ urlpatterns = [
     path('cost/collect/monthly/<int:project_id>/', views.project_monthly_cost_summary, name='project_monthly_cost_summary'),
     #RAG
     path('files/<int:file_id>/rag/index/', views.rag_index_file),
+    path('projects/<int:project_id>/rag/sessions/', views.rag_chat_sessions),
+    path('projects/<int:project_id>/rag/sessions/<int:session_id>/messages/', views.rag_chat_session_messages),
     path('projects/<int:project_id>/rag/chat/', views.rag_chat),
     path('files/<int:file_id>/rag/reindex/', views.rag_reindex_file),
+    path('files/<int:file_id>/rag/cancel/', views.rag_cancel_index_task),
+    path('files/<int:file_id>/rag/status/', views.rag_file_index_status),
     path('files/<int:file_id>/rag/vectors/', views.rag_delete_file_vectors),
 
 ]

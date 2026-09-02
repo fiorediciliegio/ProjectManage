@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Button,
   List,
   ListItem,
   ListItemText,
-  ListItemSecondaryAction,
   IconButton,
   Dialog,
   DialogTitle,
@@ -19,6 +18,8 @@ import {
   TextField,
   CircularProgress,
   Box,
+  Tooltip,
+  TablePagination,
 } from '@mui/material';
 import {
   CloudUpload,
@@ -30,13 +31,84 @@ import {
   ZoomOut,
   RestartAlt,
   AutoAwesome,
+  Cancel,
   Send,
 } from '@mui/icons-material';
 import MuiAlert from '@mui/material/Alert';
 import axios, { API_BASE_URL, getCsrfToken } from '../api/client.js';
 import { useAuth } from '../hooks/AuthContext';
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, emptyPagination, normalizePagination } from '../utils/pagination.js';
 
 const imageFormats = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']);
+const activeIndexStatuses = new Set(['queued', 'running', 'retrying', 'cancelling', 'deleting']);
+const cancellableIndexStatuses = new Set(['queued', 'running', 'retrying']);
+const indexStatusMeta = {
+  not_indexed: { label: '未入库', color: 'default', variant: 'outlined' },
+  queued: { label: '排队中', color: 'warning', variant: 'filled' },
+  running: { label: '入库中', color: 'info', variant: 'filled' },
+  retrying: { label: '正在重试', color: 'warning', variant: 'filled' },
+  cancelling: { label: '取消中', color: 'warning', variant: 'filled' },
+  completed: { label: '已入库', color: 'success', variant: 'filled' },
+  failed: { label: '入库失败', color: 'error', variant: 'filled' },
+  deleting: { label: '删除中', color: 'warning', variant: 'filled' },
+  cancelled: { label: '已取消', color: 'default', variant: 'filled' },
+};
+const indexStageMeta = {
+  idle: { label: '空闲', color: 'default' },
+  queued: { label: '任务已排队', color: 'warning' },
+  prepare: { label: '准备任务', color: 'info' },
+  retry_wait: { label: '等待重试', color: 'warning' },
+  cancel_requested: { label: '取消请求已提交', color: 'warning' },
+  cancelled: { label: '任务已取消', color: 'default' },
+  cleanup: { label: '清理旧索引', color: 'info' },
+  parse: { label: '解析文件', color: 'info' },
+  split: { label: '切分文本', color: 'info' },
+  qdrant_connect: { label: '连接向量库', color: 'info' },
+  embedding: { label: '生成向量', color: 'info' },
+  qdrant_upsert: { label: '写入向量库', color: 'info' },
+  elasticsearch_index: { label: '写入关键词索引', color: 'info' },
+  delete_vectors: { label: '删除向量索引', color: 'warning' },
+  completed: { label: '任务完成', color: 'success' },
+  failed: { label: '任务失败', color: 'error' },
+};
+
+const isFileIndexed = (file) => file?.index_status === 'completed' || file?.is_indexed;
+const shouldShowIndexStage = (file) => {
+  const stage = file?.index_stage;
+  return Boolean(stage && !['idle', 'completed'].includes(stage));
+};
+const getIndexStageMeta = (file) => {
+  const stage = file?.index_stage;
+  const label = file?.index_stage_label || indexStageMeta[stage]?.label || stage;
+  return {
+    label,
+    color: indexStageMeta[stage]?.color || 'default',
+  };
+};
+const truncateText = (text, maxLength = 120) => {
+  const value = String(text || '');
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}...`;
+};
+const buildIndexRetryText = (file) => {
+  const retryCount = Number(file?.index_retry_count || 0);
+  const maxRetries = Number(file?.index_max_retries || 0);
+
+  if (!retryCount && file?.index_status !== 'retrying') {
+    return null;
+  }
+
+  const parts = [`重试：${retryCount}/${maxRetries}`];
+  if (file?.index_next_retry_at) {
+    parts.push(`下次重试：${file.index_next_retry_at}`);
+  }
+  if (file?.index_retryable === false && file?.index_status === 'failed') {
+    parts.push('不可自动重试');
+  }
+  return parts.join(' | ');
+};
 
 const buildRagHistory = (messages) => messages
   .filter((message) => ['user', 'assistant'].includes(message.role))
@@ -47,8 +119,21 @@ const buildRagHistory = (messages) => messages
     content: String(message.content || '').trim(),
   }));
 
+const normalizeRagMessages = (messages) => (messages || [])
+  .filter((message) => ['user', 'assistant'].includes(message.role))
+  .map((message) => ({
+    role: message.role,
+    content: message.content || '',
+    sources: message.sources || [],
+    metadata: message.metadata || {},
+    error: Boolean(message.metadata?.error),
+  }));
+
 export default function FileManager({ projectId }) {
   const [files, setFiles] = useState([]);
+  const [filePage, setFilePage] = useState(0);
+  const [fileRowsPerPage, setFileRowsPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [filePagination, setFilePagination] = useState(emptyPagination());
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [openPreview, setOpenPreview] = useState(false);
   const [openSnackbar, setOpenSnackbar] = useState(false);
@@ -61,16 +146,34 @@ export default function FileManager({ projectId }) {
   const [imagePreviewErrors, setImagePreviewErrors] = useState({});
   const [ragQuestion, setRagQuestion] = useState('');
   const [ragMessages, setRagMessages] = useState([]);
+  const [ragSessionId, setRagSessionId] = useState(null);
+  const [ragSessionTitle, setRagSessionTitle] = useState('');
+  const [ragSessionLoading, setRagSessionLoading] = useState(false);
   const [ragLoading, setRagLoading] = useState(false);
   const [ragIndexing, setRagIndexing] = useState(false);
   const { user } = useAuth();
   const isManager = Boolean(user);
 
-  const fetchFiles = () => {
+  const fetchFiles = (page = filePage, pageSize = fileRowsPerPage) => {
     axios
-      .get(`http://localhost:8000/projects/${projectId}/files/`)
+      .get(`http://localhost:8000/projects/${projectId}/files/`, {
+        params: {
+          page: page + 1,
+          page_size: pageSize,
+        },
+      })
       .then((response) => {
-        setFiles(response.data?.data?.files || []);
+        const nextFiles = response.data?.data?.files || [];
+        setFiles(nextFiles);
+        setFilePagination(normalizePagination(
+          response.data?.data?.pagination,
+          page,
+          pageSize,
+          nextFiles.length
+        ));
+        setSelectedFiles((prevSelected) => (
+          prevSelected.filter((fileId) => nextFiles.some((file) => file.file_id === fileId))
+        ));
       })
       .catch((error) => {
         console.error('Error fetching file list:', error);
@@ -103,9 +206,72 @@ export default function FileManager({ projectId }) {
     return data?.message || data?.error || error.message || fallbackMessage;
   };
 
-  useEffect(() => {
-    fetchFiles();
+  const loadRagSessionMessages = useCallback(async (sessionId) => {
+    const response = await axios.get(`/projects/${projectId}/rag/sessions/${sessionId}/messages/`);
+    const data = response.data?.data || {};
+    setRagSessionId(data.session?.session_id || sessionId);
+    setRagSessionTitle(data.session?.title || '');
+    setRagMessages(normalizeRagMessages(data.messages));
   }, [projectId]);
+
+  const loadLatestRagSession = useCallback(async () => {
+    if (!projectId) {
+      return;
+    }
+    setRagSessionLoading(true);
+    try {
+      const response = await axios.get(`/projects/${projectId}/rag/sessions/`, {
+        params: {
+          page: 1,
+          page_size: 1,
+        },
+      });
+      const sessions = response.data?.data?.sessions || [];
+      if (sessions.length > 0) {
+        await loadRagSessionMessages(sessions[0].session_id);
+      } else {
+        setRagSessionId(null);
+        setRagSessionTitle('');
+        setRagMessages([]);
+      }
+    } catch (error) {
+      console.error('Error loading RAG session:', error);
+    } finally {
+      setRagSessionLoading(false);
+    }
+  }, [projectId, loadRagSessionMessages]);
+
+  useEffect(() => {
+    fetchFiles(filePage, fileRowsPerPage);
+  }, [projectId, filePage, fileRowsPerPage]);
+
+  useEffect(() => {
+    loadLatestRagSession();
+  }, [loadLatestRagSession]);
+
+  useEffect(() => {
+    if (!files.some((file) => activeIndexStatuses.has(file.index_status))) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => fetchFiles(filePage, fileRowsPerPage), 2000);
+    return () => window.clearInterval(timer);
+  }, [files, projectId, filePage, fileRowsPerPage]);
+
+  const refreshFirstFilePage = () => {
+    if (filePage === 0) {
+      fetchFiles(0, fileRowsPerPage);
+      return;
+    }
+    setFilePage(0);
+  };
+
+  const handleNewRagSession = () => {
+    setRagSessionId(null);
+    setRagSessionTitle('');
+    setRagMessages([]);
+    setRagQuestion('');
+  };
 
   const handleUpload = (event) => {
     const file = event.target.files[0];
@@ -123,7 +289,7 @@ export default function FileManager({ projectId }) {
       })
       .then((response) => {
         setUploadProgress(0);
-        fetchFiles();
+        refreshFirstFilePage();
         showSnackbar(response.data?.message || '\u6587\u4ef6\u4e0a\u4f20\u6210\u529f');
       })
       .catch(async (error) => {
@@ -161,7 +327,7 @@ export default function FileManager({ projectId }) {
     selectedFiles.forEach(async (fileId) => {
       try {
         const response = await axios.delete(`http://localhost:8000/files/${fileId}/`);
-        fetchFiles();
+        refreshFirstFilePage();
         setSelectedFiles([]);
         showSnackbar(response.data?.message || '\u6587\u4ef6\u5220\u9664\u6210\u529f');
       } catch (error) {
@@ -184,14 +350,14 @@ export default function FileManager({ projectId }) {
 
     for (const fileId of selectedFiles) {
       const selectedFile = files.find((file) => file.file_id === fileId);
-      const url = selectedFile?.is_indexed
+      const url = isFileIndexed(selectedFile)
         ? `http://localhost:8000/files/${fileId}/rag/reindex/`
         : `http://localhost:8000/files/${fileId}/rag/index/`;
 
       try {
         await axios.post(url);
         successCount += 1;
-        if (selectedFile?.is_indexed) {
+        if (isFileIndexed(selectedFile)) {
           reindexCount += 1;
         }
       } catch (error) {
@@ -204,17 +370,17 @@ export default function FileManager({ projectId }) {
 
     if (successCount > 0) {
       const message = reindexCount > 0
-        ? `\u5df2\u5b8c\u6210 ${successCount} \u4e2a\u6587\u4ef6\u5411\u91cf\u5165\u5e93/\u91cd\u65b0\u5165\u5e93`
-        : `\u5df2\u5b8c\u6210 ${successCount} \u4e2a\u6587\u4ef6\u5165\u5e93`;
+        ? `\u5df2\u63d0\u4ea4 ${successCount} \u4e2a\u6587\u4ef6\u5411\u91cf\u5165\u5e93/\u91cd\u65b0\u5165\u5e93\u4efb\u52a1`
+        : `\u5df2\u63d0\u4ea4 ${successCount} \u4e2a\u6587\u4ef6\u5165\u5e93\u4efb\u52a1`;
       showSnackbar(message);
-      fetchFiles();
+      fetchFiles(filePage, fileRowsPerPage);
     }
   };
 
   const handleDeleteSelectedFileVectors = async () => {
     const indexedFileIds = selectedFiles.filter((fileId) => {
       const selectedFile = files.find((file) => file.file_id === fileId);
-      return selectedFile?.is_indexed;
+      return isFileIndexed(selectedFile);
     });
 
     if (indexedFileIds.length === 0) {
@@ -238,8 +404,40 @@ export default function FileManager({ projectId }) {
     setRagIndexing(false);
 
     if (successCount > 0) {
-      showSnackbar(`\u5df2\u5220\u9664 ${successCount} \u4e2a\u6587\u4ef6\u7684\u5411\u91cf`);
-      fetchFiles();
+      showSnackbar(`\u5df2\u63d0\u4ea4 ${successCount} \u4e2a\u6587\u4ef6\u7684\u5411\u91cf\u5220\u9664\u4efb\u52a1`);
+      fetchFiles(filePage, fileRowsPerPage);
+    }
+  };
+
+  const handleCancelSelectedIndexTasks = async () => {
+    const cancellableFileIds = selectedFiles.filter((fileId) => {
+      const selectedFile = files.find((file) => file.file_id === fileId);
+      return cancellableIndexStatuses.has(selectedFile?.index_status);
+    });
+
+    if (cancellableFileIds.length === 0) {
+      showSnackbar('请先选择正在排队、入库或重试的文件', 'warning');
+      return;
+    }
+
+    setRagIndexing(true);
+    let successCount = 0;
+
+    for (const fileId of cancellableFileIds) {
+      try {
+        await axios.post(`http://localhost:8000/files/${fileId}/rag/cancel/`);
+        successCount += 1;
+      } catch (error) {
+        console.error('Error cancelling file index task:', error);
+        showSnackbar(await getErrorMessage(error, '文件入库取消失败'), 'error');
+      }
+    }
+
+    setRagIndexing(false);
+
+    if (successCount > 0) {
+      showSnackbar(`已提交 ${successCount} 个文件的入库取消请求`);
+      fetchFiles(filePage, fileRowsPerPage);
     }
   };
 
@@ -269,7 +467,7 @@ export default function FileManager({ projectId }) {
           ...(csrfToken ? { 'X-CSRFToken': csrfToken } : {}),
         },
         credentials: 'include',
-        body: JSON.stringify({ question, history }),
+        body: JSON.stringify({ question, history, session_id: ragSessionId }),
       });
 
       if (!response.ok) {
@@ -308,6 +506,13 @@ export default function FileManager({ projectId }) {
           }
 
           const event = JSON.parse(line);
+
+          if (event.type === 'session') {
+            setRagSessionId(event.session_id || event.session?.session_id || null);
+            if (event.session?.title) {
+              setRagSessionTitle(event.session.title);
+            }
+          }
 
           if (event.type === 'delta') {
             setRagMessages((prev) => {
@@ -396,6 +601,15 @@ export default function FileManager({ projectId }) {
     setFileTypeFilter(event.target.value);
   };
 
+  const handleFilePageChange = (event, newPage) => {
+    setFilePage(newPage);
+  };
+
+  const handleFileRowsPerPageChange = (event) => {
+    setFileRowsPerPage(Number(event.target.value));
+    setFilePage(0);
+  };
+
   const handleZoomIn = () => {
     setImageZoom((prev) => Math.min(prev + 0.25, 3));
   };
@@ -411,8 +625,9 @@ export default function FileManager({ projectId }) {
   const selectedFileObjects = selectedFiles
     .map((fileId) => files.find((file) => file.file_id === fileId))
     .filter(Boolean);
-  const hasIndexedSelection = selectedFileObjects.some((file) => file.is_indexed);
-  const hasOnlyIndexedSelection = selectedFileObjects.length > 0 && selectedFileObjects.every((file) => file.is_indexed);
+  const hasIndexedSelection = selectedFileObjects.some(isFileIndexed);
+  const hasOnlyIndexedSelection = selectedFileObjects.length > 0 && selectedFileObjects.every(isFileIndexed);
+  const hasCancellableIndexSelection = selectedFileObjects.some((file) => cancellableIndexStatuses.has(file.index_status));
   const indexActionLabel = hasOnlyIndexedSelection ? '\u91cd\u65b0\u5165\u5e93' : '\u5165\u5e93';
 
   const fileTypeOptions = Array.from(
@@ -504,6 +719,18 @@ export default function FileManager({ projectId }) {
                     </Grid>
                     <Grid item>
                       <IconButton
+                        aria-label="cancel-file-index"
+                        onClick={handleCancelSelectedIndexTasks}
+                        disabled={!hasCancellableIndexSelection || ragIndexing}
+                      >
+                        <Cancel />
+                      </IconButton>
+                    </Grid>
+                    <Grid item>
+                      <Typography variant="body2">{'\u53d6\u6d88\u5165\u5e93'}</Typography>
+                    </Grid>
+                    <Grid item>
+                      <IconButton
                         aria-label="delete-file-vectors"
                         onClick={handleDeleteSelectedFileVectors}
                         disabled={!hasIndexedSelection || ragIndexing}
@@ -528,7 +755,9 @@ export default function FileManager({ projectId }) {
                     )}
                   </Grid>
                 </Box>
-                <Typography variant="body2" color="text.secondary" sx={{ ml: 'auto', mr: 2, whiteSpace: 'nowrap' }}>{'\u6587\u4ef6\u6570\u91cf\uff1a'}{filteredFiles.length}</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ ml: 'auto', mr: 2, whiteSpace: 'nowrap' }}>
+                  {`\u5f53\u524d\u9875\uff1a${filteredFiles.length} / \u603b\u6570\uff1a${filePagination.total}`}
+                </Typography>
               </ListItem>
               {filteredFiles.map((file) => (
                 <ListItem key={file.file_id} divider>
@@ -540,19 +769,74 @@ export default function FileManager({ projectId }) {
                     primary={
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                         <span>{`${file.file_name} ${file.file_format}`}</span>
-                        <Chip
-                          size="small"
-                          label={file.is_indexed ? '\u5df2\u5165\u5e93' : '\u672a\u5165\u5e93'}
-                          color={file.is_indexed ? 'success' : 'default'}
-                          variant={file.is_indexed ? 'filled' : 'outlined'}
-                        />
+                        {(() => {
+                          const meta = indexStatusMeta[file.index_status] || indexStatusMeta[isFileIndexed(file) ? 'completed' : 'not_indexed'];
+                          const stageMeta = getIndexStageMeta(file);
+                          return (
+                            <>
+                              <Chip
+                                size="small"
+                                label={meta.label}
+                                color={meta.color}
+                                variant={meta.variant}
+                              />
+                              {shouldShowIndexStage(file) && (
+                                <Chip
+                                  size="small"
+                                  label={stageMeta.label}
+                                  color={stageMeta.color}
+                                  variant="outlined"
+                                />
+                              )}
+                            </>
+                          );
+                        })()}
                       </Box>
                     }
-                    secondary={`\u4e0a\u4f20\u4eba\uff1a${file.uploader_name || "\u672a\u77e5"} | \u4e0a\u4f20\u65f6\u95f4\uff1a${file.upload_time || ""}`}
+                    secondary={
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                        <Typography variant="body2" color="text.secondary">
+                          {[
+                            `\u4e0a\u4f20\u4eba\uff1a${file.uploader_name || "\u672a\u77e5"}`,
+                            `\u4e0a\u4f20\u65f6\u95f4\uff1a${file.upload_time || ""}`,
+                            file.indexed_at ? `\u5165\u5e93\u65f6\u95f4\uff1a${file.indexed_at}` : null,
+                          ].filter(Boolean).join(' | ')}
+                        </Typography>
+                        {shouldShowIndexStage(file) && (
+                          <Typography variant="body2" color="text.secondary">
+                            {`\u5f53\u524d\u9636\u6bb5\uff1a${getIndexStageMeta(file).label}`}
+                          </Typography>
+                        )}
+                        {buildIndexRetryText(file) && (
+                          <Typography variant="body2" color={file.index_status === 'failed' ? 'error' : 'warning.main'}>
+                            {buildIndexRetryText(file)}
+                          </Typography>
+                        )}
+                        {file.index_error && (
+                          <Tooltip title={file.index_error_detail || file.index_error} placement="top-start">
+                            <Typography variant="body2" color="error" sx={{ cursor: 'help' }}>
+                              {[
+                                file.index_error_type ? `\u5f02\u5e38\u7c7b\u578b\uff1a${file.index_error_type}` : null,
+                                `\u9519\u8bef\uff1a${truncateText(file.index_error)}`,
+                              ].filter(Boolean).join(' | ')}
+                            </Typography>
+                          </Tooltip>
+                        )}
+                      </Box>
+                    }
                   />
                 </ListItem>
               ))}
             </List>
+            <TablePagination
+              rowsPerPageOptions={PAGE_SIZE_OPTIONS}
+              component="div"
+              count={filePagination.total}
+              rowsPerPage={fileRowsPerPage}
+              page={filePage}
+              onPageChange={handleFilePageChange}
+              onRowsPerPageChange={handleFileRowsPerPageChange}
+            />
           </Paper>
         </Grid>
         <Grid item xs={4.6} sx={{ minWidth: 0 }}>
@@ -560,12 +844,33 @@ export default function FileManager({ projectId }) {
             elevation={3}
             sx={{ height: 'calc(100vh - 160px)', minHeight: 680, width: '100%', p: 2, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}
           >
-            <Typography variant="h6" sx={{ mb: 1 }}>{'\u9879\u76ee\u6587\u6863\u95ee\u7b54'}</Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1 }}>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="h6">{'\u9879\u76ee\u6587\u6863\u95ee\u7b54'}</Typography>
+                {ragSessionTitle && (
+                  <Typography variant="caption" color="text.secondary" noWrap display="block">
+                    {`当前会话：${ragSessionTitle}`}
+                  </Typography>
+                )}
+              </Box>
+              <Tooltip title="新对话">
+                <span>
+                  <IconButton size="small" onClick={handleNewRagSession} disabled={ragLoading || ragSessionLoading}>
+                    <RestartAlt fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Box>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               {'\u5148\u9009\u62e9\u6587\u4ef6\u70b9\u51fb\u201c\u5165\u5e93\u201d\uff0c\u518d\u6839\u636e\u9879\u76ee\u6587\u6863\u63d0\u95ee\u3002'}
             </Typography>
             <Box sx={{ flex: 1, overflowY: 'auto', pr: 1, mb: 2, borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
-              {ragMessages.length === 0 ? (
+              {ragSessionLoading ? (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 2 }}>
+                  <CircularProgress size={18} />
+                  <Typography variant="body2" color="text.secondary">正在加载历史对话...</Typography>
+                </Box>
+              ) : ragMessages.length === 0 ? (
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
                   {'\u6682\u65e0\u5bf9\u8bdd\uff0c\u53ef\u4ee5\u8be2\u95ee\u201c\u8fd9\u4e2a\u9879\u76ee\u6587\u4ef6\u4e3b\u8981\u8bb2\u4e86\u4ec0\u4e48\uff1f\u201d\u6216\u201c\u8d28\u91cf\u68c0\u67e5\u6709\u54ea\u4e9b\u8981\u6c42\uff1f\u201d\u3002'}
                 </Typography>

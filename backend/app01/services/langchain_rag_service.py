@@ -12,8 +12,10 @@ import requests
 import statistics
 import pdfplumber
 import tempfile
+import logging
+import json
 from typing import List
-from openai import OpenAI
+from openai import DefaultHttpxClient, OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, Filter, FieldCondition, MatchValue, MatchAny
 from langchain_core.embeddings import Embeddings
@@ -23,6 +25,14 @@ from app01.services.elasticsearch_service import (
     index_chunks_to_elasticsearch,
     delete_file_chunks_from_elasticsearch,
     keyword_search_file_chunks)
+from app01.services.rag_resilience_service import (
+    is_circuit_allowed,
+    record_component_failure,
+    record_component_success,
+)
+
+
+logger = logging.getLogger("app01.rag_resilience")
 
 # ———————————————————— 文件预处理 ————————————————————
 def build_base_metadata(file_obj):
@@ -1056,25 +1066,34 @@ def preview_file_chunks(file_obj):
 # 本地 Qwen3 Embedding 适配器
 class LocalOpenAICompatibleEmbeddings(Embeddings):
     def __init__(self):
-        self.client = OpenAI(api_key='local', base_url=settings.EMBEDDING_BASE_URL)
+        self.client = OpenAI(
+            api_key='local',
+            base_url=settings.EMBEDDING_BASE_URL,
+            http_client=DefaultHttpxClient(trust_env=False),
+        )
         self.model = settings.EMBEDDING_MODEL
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         cleaned_texts = [
-            self._clean_text(text)
+            self._clean_text(text) or ' '
             for text in texts
-            if self._clean_text(text)
         ]
 
         if not cleaned_texts:
             return []
 
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=cleaned_texts,
-        )
+        batch_size = max(1, int(getattr(settings, 'EMBEDDING_BATCH_SIZE', 8)))
+        vectors = []
 
-        return [item.embedding for item in response.data]
+        for start in range(0, len(cleaned_texts), batch_size):
+            batch = cleaned_texts[start:start + batch_size]
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=batch,
+            )
+            vectors.extend(item.embedding for item in response.data)
+
+        return vectors
 
     def embed_query(self, text: str) -> List[float]:
         vectors = self.embed_documents([text])
@@ -1092,6 +1111,8 @@ def get_langchain_qdrant_client():
         url=settings.QDRANT_URL,
         prefer_grpc=False,
         timeout=10,
+        check_compatibility=False,
+        trust_env=False,
     )
 
 def ensure_langchain_collection():
@@ -1124,9 +1145,11 @@ def get_langchain_vector_store():
     )
 
 # 删除旧向量
-def delete_langchain_file_vectors(file_id):
+def delete_langchain_file_vectors(file_id, stage_callback=None):
+    notify_stage(stage_callback, 'qdrant_connect')
     client = ensure_langchain_collection()
 
+    notify_stage(stage_callback, 'delete_vectors')
     client.delete(
         collection_name=settings.LANGCHAIN_QDRANT_COLLECTION,
         points_selector=Filter(
@@ -1138,7 +1161,14 @@ def delete_langchain_file_vectors(file_id):
             ]
         ),
     )
-    delete_file_chunks_from_elasticsearch(file_id)
+
+    notify_stage(stage_callback, 'elasticsearch_index')
+    elasticsearch_result = delete_file_chunks_from_elasticsearch(file_id)
+    return {
+        'file_id': file_id,
+        'qdrant_deleted': True,
+        'elasticsearch': elasticsearch_result,
+    }
 
 # 查询是否入库
 def get_indexed_file_ids(project_id):
@@ -1177,8 +1207,16 @@ def get_indexed_file_ids(project_id):
     return file_ids
 
 # 写入 Qdrant
-def index_file_to_qdrant_langchain(file_obj):
+def notify_stage(stage_callback, stage):
+    if stage_callback:
+        stage_callback(stage)
+
+
+def index_file_to_qdrant_langchain(file_obj, stage_callback=None):
+    notify_stage(stage_callback, 'parse')
     documents = load_file_as_documents(file_obj)
+
+    notify_stage(stage_callback, 'split')
     chunks = split_documents(documents)
 
     if not chunks:
@@ -1188,8 +1226,10 @@ def index_file_to_qdrant_langchain(file_obj):
             'message': '文件中没有可入库的文本内容',
         }
 
-    delete_langchain_file_vectors(file_obj.pk)
+    notify_stage(stage_callback, 'cleanup')
+    delete_langchain_file_vectors(file_obj.pk, stage_callback=stage_callback)
 
+    notify_stage(stage_callback, 'qdrant_connect')
     vector_store = get_langchain_vector_store()
 
     ids = [
@@ -1197,10 +1237,16 @@ def index_file_to_qdrant_langchain(file_obj):
         for index, _ in enumerate(chunks)
     ]
 
-    vector_store.add_documents(
-        documents=chunks,
-        ids=ids,
-    )
+    upsert_batch_size = max(1, int(getattr(settings, 'VECTOR_UPSERT_BATCH_SIZE', 16)))
+    for start in range(0, len(chunks), upsert_batch_size):
+        notify_stage(stage_callback, 'embedding')
+        vector_store.add_documents(
+            documents=chunks[start:start + upsert_batch_size],
+            ids=ids[start:start + upsert_batch_size],
+        )
+        notify_stage(stage_callback, 'qdrant_upsert')
+
+    notify_stage(stage_callback, 'elasticsearch_index')
     elasticsearch_result = index_chunks_to_elasticsearch(file_obj, chunks)
     file_name = f'{file_obj.NAME_File}{file_obj.FORM_File or ""}'
     return {
@@ -1256,6 +1302,107 @@ def make_search_result_key(item):
         item.get('chunk_index'),
     )
 
+
+def clean_multi_query_line(line):
+    line = str(line or '').strip()
+    line = re.sub(r'^\s*[-*•]\s*', '', line)
+    line = re.sub(r'^\s*\d+[\.\)、)]\s*', '', line)
+    line = line.strip(' "\'“”‘’')
+    max_chars = max(20, int(getattr(settings, 'RAG_MULTI_QUERY_MAX_QUERY_CHARS', 180)))
+    return line[:max_chars].strip()
+
+
+def unique_queries(queries, max_queries):
+    seen = set()
+    results = []
+    for query in queries:
+        cleaned = clean_multi_query_line(query)
+        if not cleaned:
+            continue
+        key = re.sub(r'\s+', '', cleaned).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(cleaned)
+        if len(results) >= max_queries:
+            break
+    return results
+
+
+def generate_multi_search_queries(question):
+    question = str(question or '').strip()
+    if not question:
+        return []
+
+    enabled = bool(getattr(settings, 'RAG_MULTI_QUERY_ENABLED', True))
+    generated_count = max(0, int(getattr(settings, 'RAG_MULTI_QUERY_COUNT', 3)))
+    max_queries = generated_count + 1
+    if not enabled or generated_count <= 0:
+        return [clean_multi_query_line(question)]
+
+    if not settings.RAG_CHAT_API_KEY:
+        return [clean_multi_query_line(question)]
+
+    if not is_circuit_allowed('chat_model'):
+        logger.warning('rag chat model circuit open, skip multi-query generation')
+        return [clean_multi_query_line(question)]
+
+    prompt = f'''
+请围绕下面的项目文档检索问题，生成 {generated_count} 个不同角度的检索查询。
+
+要求：
+1. 每个查询都要忠实保留原问题意图，不要引入没有依据的新对象。
+2. 查询之间要尽量覆盖不同表达方式、同义词、实体名称、工程管理术语。
+3. 适合用于向量检索和 BM25 关键词检索。
+4. 每行只输出一个查询，不要编号，不要解释。
+
+原始检索问题：
+{question}
+
+多路检索查询：
+'''.strip()
+
+    try:
+        client = get_chat_client()
+        response = client.chat.completions.create(
+            model=settings.RAG_CHAT_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': '你是项目文档 RAG 系统的 Multi-Query 检索改写器，只输出检索查询。',
+                },
+                {
+                    'role': 'user',
+                    'content': prompt,
+                },
+            ],
+            temperature=0.2,
+        )
+        record_component_success('chat_model')
+    except Exception as exc:
+        record_component_failure('chat_model', exc)
+        logger.warning('rag multi-query generation degraded error=%r', exc)
+        return [clean_multi_query_line(question)]
+
+    content = response.choices[0].message.content or ''
+    generated_queries = [
+        line
+        for line in content.splitlines()
+        if clean_multi_query_line(line)
+    ]
+    return unique_queries([question, *generated_queries], max_queries=max_queries) or [clean_multi_query_line(question)]
+
+
+def attach_query_metadata(results, query, query_index):
+    return [
+        {
+            **item,
+            'retrieval_query': query,
+            'retrieval_query_index': query_index,
+        }
+        for item in results
+    ]
+
 # RRF 融合函数
 def reciprocal_rank_fusion(result_groups, rrf_k=60, top_k=8):
     fused_map = {}
@@ -1275,11 +1422,16 @@ def reciprocal_rank_fusion(result_groups, rrf_k=60, top_k=8):
                 }
 
             fused_map[key]['rrf_score'] += 1 / (rrf_k + rank)
-            fused_map[key]['retrieval_sources'].append({
+            retrieval_source = {
                 'source': group_name,
                 'rank': rank,
                 'score': item.get('score'),
-            })
+            }
+            if item.get('retrieval_query'):
+                retrieval_source['query'] = item.get('retrieval_query')
+            if item.get('retrieval_query_index') is not None:
+                retrieval_source['query_index'] = item.get('retrieval_query_index')
+            fused_map[key]['retrieval_sources'].append(retrieval_source)
 
             if len(str(item.get('text') or '')) > len(str(fused_map[key].get('text') or '')):
                 fused_map[key]['text'] = item.get('text')
@@ -1295,18 +1447,28 @@ def reciprocal_rank_fusion(result_groups, rrf_k=60, top_k=8):
 
 # 混合检索函数
 def hybrid_search_file_chunks(question, project_id=None, final_limit=8):
-    vector_results = search_file_chunks_langchain(
-        question=question,
-        project_id=project_id,
-        limit=25,               # Qdrant 召回前 25 个 chunk
-    )
-    keyword_results = keyword_search_file_chunks(
-        query=question,
-        project_id=project_id,
-        limit=25,               # Elasticsearch 也先召回前 25 个 chunk
-    )
+    queries = generate_multi_search_queries(question)
+    recall_limit = max(1, int(getattr(settings, 'RAG_MULTI_QUERY_RECALL_LIMIT', 20)))
+    result_groups = []
+
+    for query_index, query in enumerate(queries, start=1):
+        vector_results = search_file_chunks_langchain(
+            question=query,
+            project_id=project_id,
+            limit=recall_limit,               # Qdrant 每路召回一批候选 chunk
+        )
+        keyword_results = keyword_search_file_chunks(
+            query=query,
+            project_id=project_id,
+            limit=recall_limit,               # Elasticsearch 每路召回一批候选 chunk
+        )
+        result_groups.extend([
+            ('vector', attach_query_metadata(vector_results, query, query_index)),
+            ('keyword', attach_query_metadata(keyword_results, query, query_index)),
+        ])
+
     fused_results = reciprocal_rank_fusion(
-        result_groups=[('vector', vector_results), ('keyword', keyword_results)],
+        result_groups=result_groups,
         rrf_k=60,               # RRF算法将二者结果按排名融合排序，公式：rrf_score += 1 / (rrf_k + rank)
         top_k=RERANK_CANDIDATE_LIMIT,           # 再从融合结果里取 RERANK_CANDIDATE_LIMIT 个 chunk
     )
@@ -1368,7 +1530,7 @@ def get_retrieval_source_names(item):
     }
 
 # 规则 rerank 参数
-RERANK_CANDIDATE_LIMIT = 18
+RERANK_CANDIDATE_LIMIT = int(getattr(settings, 'RAG_RERANK_CANDIDATE_LIMIT', 32))
 RERANK_FINAL_LIMIT = 8
 RERANK_DOUBLE_HIT_BONUS = 1.20
 RERANK_TITLE_MATCH_BONUS = 1.15
@@ -1450,7 +1612,7 @@ def rule_rerank_search_results(search_results, question, top_k=RERANK_FINAL_LIMI
     return reranked_results[:top_k]
 
 # 使用 rerank 模型
-MODEL_RERANK_CANDIDATE_LIMIT = 14
+MODEL_RERANK_CANDIDATE_LIMIT = int(getattr(settings, 'RAG_MODEL_RERANK_CANDIDATE_LIMIT', 24))
 MODEL_RERANK_WEIGHT = 0.60          # 模型rerank权重
 RULE_RERANK_WEIGHT = 0.40           # 规则rerank权重
 
@@ -1484,7 +1646,7 @@ def normalize_item_scores(items, score_key):
 
     return normalized_scores
 
-# 使用模型进行 rerank
+# 使用 gte-rerank-v2 模型进行 rerank
 def rerank_search_results_with_model(question, search_results, top_k=8):
     if not search_results:
         return []
@@ -1492,25 +1654,35 @@ def rerank_search_results_with_model(question, search_results, top_k=8):
     api_key = getattr(settings, 'RAG_RERANK_API_KEY', '')
     if not api_key:
         return search_results[:top_k]
+    if not is_circuit_allowed('rerank'):
+        logger.warning('rag rerank circuit open, fallback to rule rerank results')
+        return search_results[:top_k]
 
-    candidate_results = search_results[:MODEL_RERANK_CANDIDATE_LIMIT]
+    candidate_limit = max(
+        top_k,
+        int(getattr(settings, 'RAG_MODEL_RERANK_CANDIDATE_LIMIT', MODEL_RERANK_CANDIDATE_LIMIT)),
+    )
+    candidate_results = search_results[:candidate_limit]
     documents = [
         truncate_rerank_document_text(item.get('text') or '')
         for item in candidate_results
     ]
+
+    model_name = getattr(settings, 'RAG_RERANK_MODEL', 'gte-rerank-v2')
+
     payload = {
-        'model': getattr(settings, 'RAG_RERANK_MODEL', 'qwen3-rerank'),
-        'query': str(question or ''),
-        'documents': documents,
-        'top_n': min(top_k, len(documents)),
-        'instruct': getattr(
-            settings,
-            'RAG_RERANK_INSTRUCT',
-            'Given a web search query, retrieve relevant passages that answer the query.',
-        ),
+        'model': model_name,
+        'input': {
+            'query': str(question or ''),
+            'documents': documents,
+        },
+        'parameters': {
+            'top_n': min(top_k, len(documents)),
+            'return_documents': False,
+        },
     }
 
-    url = f"{getattr(settings, 'RAG_RERANK_BASE_URL').rstrip('/')}/reranks"
+    url = getattr(settings, 'RAG_RERANK_BASE_URL').rstrip('/')
 
     try:
         response = requests.post(
@@ -1525,10 +1697,13 @@ def rerank_search_results_with_model(question, search_results, top_k=8):
         response.raise_for_status()
         data = response.json()
     except Exception as e:
-        print('qwen3-rerank 调用失败:', repr(e))
+        record_component_failure('rerank', e)
+        logger.warning('rag rerank degraded model=%s error=%r', model_name, e)
         return search_results[:top_k]
 
-    results_data = data.get('results') or data.get('output', {}).get('results', [])
+    record_component_success('rerank')
+
+    results_data = data.get('output', {}).get('results', [])
 
     model_score_map = {}
 
@@ -1561,8 +1736,13 @@ def rerank_search_results_with_model(question, search_results, top_k=8):
             + rule_score * RULE_RERANK_WEIGHT
         )
 
-        reranked_item = {**item, 'model_rerank_score': model_score, 'normalized_rule_rerank_score': rule_score,
-                         'model_rule_combined_score': combined_score, 'model_rerank_model': payload['model']}
+        reranked_item = {
+            **item,
+            'model_rerank_score': model_score,
+            'normalized_rule_rerank_score': rule_score,
+            'model_rule_combined_score': combined_score,
+            'model_rerank_model': model_name,
+        }
 
         reranked_results.append(reranked_item)
 
@@ -1572,6 +1752,94 @@ def rerank_search_results_with_model(question, search_results, top_k=8):
     )
 
     return reranked_results[:top_k]
+# 使用 qwen3-rerank 时的函数
+# def rerank_search_results_with_model(question, search_results, top_k=8):
+#     if not search_results:
+#         return []
+#
+#     api_key = getattr(settings, 'RAG_RERANK_API_KEY', '')
+#     if not api_key:
+#         return search_results[:top_k]
+#
+#     candidate_results = search_results[:MODEL_RERANK_CANDIDATE_LIMIT]
+#     documents = [
+#         truncate_rerank_document_text(item.get('text') or '')
+#         for item in candidate_results
+#     ]
+#     payload = {
+#         'model': getattr(settings, 'RAG_RERANK_MODEL', 'qwen3-rerank'),
+#         'query': str(question or ''),
+#         'documents': documents,
+#         'top_n': min(top_k, len(documents)),
+#         'instruct': getattr(
+#             settings,
+#             'RAG_RERANK_INSTRUCT',
+#             'Given a web search query, retrieve relevant passages that answer the query.',
+#         ),
+#     }
+#
+#     url = f"{getattr(settings, 'RAG_RERANK_BASE_URL').rstrip('/')}/reranks"
+#
+#     try:
+#         response = requests.post(
+#             url,
+#             headers={
+#                 'Authorization': f'Bearer {api_key}',
+#                 'Content-Type': 'application/json',
+#             },
+#             json=payload,
+#             timeout=getattr(settings, 'RAG_RERANK_TIMEOUT', 30),
+#         )
+#         response.raise_for_status()
+#         data = response.json()
+#     except Exception as e:
+#         print('qwen3-rerank 调用失败:', repr(e))
+#         return search_results[:top_k]
+#
+#     results_data = data.get('results') or data.get('output', {}).get('results', [])
+#
+#     model_score_map = {}
+#
+#     for result in results_data:
+#         index = result.get('index')
+#         if index is None or index >= len(candidate_results):
+#             continue
+#
+#         model_score_map[index] = float(result.get('relevance_score') or 0)
+#
+#     if not model_score_map:
+#         return search_results[:top_k]
+#
+#     normalized_rule_scores = normalize_item_scores(
+#         candidate_results,
+#         'rule_rerank_score',
+#     )
+#
+#     reranked_results = []
+#
+#     for index, item in enumerate(candidate_results):
+#         if index not in model_score_map:
+#             continue
+#
+#         model_score = model_score_map[index]
+#         rule_score = normalized_rule_scores.get(index, 0)
+#
+#         combined_score = (
+#             model_score * MODEL_RERANK_WEIGHT
+#             + rule_score * RULE_RERANK_WEIGHT
+#         )
+#
+#         reranked_item = {**item, 'model_rerank_score': model_score, 'normalized_rule_rerank_score': rule_score,
+#                          'model_rule_combined_score': combined_score, 'model_rerank_model': payload['model']}
+#
+#         reranked_results.append(reranked_item)
+#
+#     reranked_results.sort(
+#         key=lambda item: item.get('model_rule_combined_score', 0),
+#         reverse=True,
+#     )
+#
+#     return reranked_results[:top_k]
 
 
 def qdrant_point_to_search_result(point, score=None):
@@ -1809,6 +2077,399 @@ def limit_context_items_per_file(items):
 
     return limited_items
 
+
+def split_context_units(text):
+    text = str(text or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    if not text:
+        return []
+
+    units = []
+    for paragraph in re.split(r'\n+', text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        if looks_like_table_or_figure_text(paragraph):
+            units.append(paragraph)
+            continue
+        for sentence in re.split(r'(?<=[。！？!?；;])\s*', paragraph):
+            sentence = sentence.strip()
+            if sentence:
+                units.append(sentence)
+    return units
+
+
+def build_contextual_query_terms(question):
+    base_terms = extract_query_terms(question)
+    stop_terms = {'这个', '那个', '哪些', '什么', '如何', '怎么', '是否', '进行', '一下'}
+    terms = []
+
+    for term in base_terms:
+        term = str(term or '').strip()
+        if not term or term in stop_terms:
+            continue
+        terms.append(term)
+        if re.fullmatch(r'[\u4e00-\u9fff]{4,}', term):
+            for size in [2, 3, 4]:
+                for start in range(0, max(0, len(term) - size + 1)):
+                    ngram = term[start:start + size]
+                    if ngram not in stop_terms:
+                        terms.append(ngram)
+
+    return unique_queries(terms, max_queries=40)
+
+
+def score_context_unit(unit, query_terms):
+    unit = str(unit or '')
+    lower_unit = unit.lower()
+    score = 0.0
+
+    for term in query_terms:
+        lower_term = str(term or '').lower()
+        if not lower_term:
+            continue
+        occurrences = lower_unit.count(lower_term)
+        if occurrences <= 0:
+            continue
+        score += occurrences * (1.0 + min(len(lower_term), 8) / 8)
+
+    if re.search(r'\d', unit):
+        score += 0.2
+
+    return score
+
+
+def compress_table_like_context_text(text, query_terms, max_chars):
+    lines = [
+        line.strip()
+        for line in str(text or '').splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return '', {'matched': False, 'compression_score': 0}
+
+    selected_indexes = set()
+    window = max(0, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_SENTENCE_WINDOW', 1)))
+    max_sentences = max(1, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_MAX_SENTENCES', 6)))
+
+    for index, line in enumerate(lines):
+        if score_context_unit(line, query_terms) > 0:
+            for neighbor_index in range(max(0, index - window), min(len(lines), index + window + 1)):
+                selected_indexes.add(neighbor_index)
+
+    if selected_indexes:
+        selected_indexes.add(0)
+
+    if not selected_indexes:
+        return '', {'matched': False, 'compression_score': 0}
+
+    selected_lines = [
+        lines[index]
+        for index in sorted(selected_indexes)[:max_sentences + 1]
+    ]
+    compressed_text = truncate_context_text('\n'.join(selected_lines), max_chars=max_chars)
+    return compressed_text, {
+        'matched': True,
+        'compression_score': sum(score_context_unit(line, query_terms) for line in selected_lines),
+    }
+
+
+def compress_context_text_by_query(text, question):
+    text = str(text or '').strip()
+    max_chars = max(120, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_MAX_ITEM_CHARS', 900)))
+    if not text:
+        return '', {'matched': False, 'compressed': False, 'compression_score': 0}
+
+    if len(text) <= max_chars:
+        return text, {
+            'matched': True,
+            'compressed': False,
+            'compression_score': 0,
+            'compression_ratio': 1.0,
+        }
+
+    query_terms = build_contextual_query_terms(question)
+    if not query_terms:
+        compressed_text = truncate_context_text(text, max_chars=max_chars)
+        return compressed_text, {
+            'matched': True,
+            'compressed': True,
+            'compression_score': 0,
+            'compression_ratio': len(compressed_text) / max(len(text), 1),
+        }
+
+    if looks_like_table_or_figure_text(text):
+        compressed_text, metadata = compress_table_like_context_text(text, query_terms, max_chars)
+    else:
+        units = split_context_units(text)
+        scored_units = [
+            (index, score_context_unit(unit, query_terms))
+            for index, unit in enumerate(units)
+        ]
+        matched_units = [
+            (index, score)
+            for index, score in scored_units
+            if score > 0
+        ]
+        if not matched_units:
+            return '', {
+                'matched': False,
+                'compressed': True,
+                'compression_score': 0,
+                'compression_ratio': 0,
+            }
+
+        window = max(0, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_SENTENCE_WINDOW', 1)))
+        max_sentences = max(1, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_MAX_SENTENCES', 6)))
+        selected_indexes = set()
+        for index, _ in sorted(matched_units, key=lambda item: (-item[1], item[0]))[:max_sentences]:
+            for neighbor_index in range(max(0, index - window), min(len(units), index + window + 1)):
+                selected_indexes.add(neighbor_index)
+
+        compressed_text = truncate_context_text(
+            '\n'.join(units[index] for index in sorted(selected_indexes)),
+            max_chars=max_chars,
+        )
+        metadata = {
+            'matched': True,
+            'compression_score': sum(score for _, score in matched_units),
+        }
+
+    if not compressed_text:
+        return '', {
+            **metadata,
+            'compressed': True,
+            'compression_ratio': 0,
+        }
+
+    return compressed_text, {
+        **metadata,
+        'compressed': len(compressed_text) < len(text),
+        'compression_ratio': len(compressed_text) / max(len(text), 1),
+    }
+
+
+def rule_contextual_compress_search_results(search_results, question):
+    if not getattr(settings, 'RAG_CONTEXT_COMPRESSION_ENABLED', True):
+        return search_results
+
+    candidate_limit = max(
+        CONTEXT_MAX_ITEMS,
+        int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_CANDIDATE_LIMIT', 16)),
+    )
+    min_keep_items = max(0, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_MIN_KEEP_ITEMS', 6)))
+    max_chars = max(120, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_MAX_ITEM_CHARS', 900)))
+    drop_unmatched_after_min_keep = bool(
+        getattr(settings, 'RAG_CONTEXT_COMPRESSION_DROP_UNMATCHED_AFTER_MIN_KEEP', False)
+    )
+    compressed_results = []
+
+    for item in search_results[:candidate_limit]:
+        original_text = str(item.get('text') or '').strip()
+        if not original_text:
+            continue
+
+        compressed_text, compression_metadata = compress_context_text_by_query(
+            original_text,
+            question,
+        )
+        if not compressed_text:
+            if drop_unmatched_after_min_keep and len(compressed_results) >= min_keep_items:
+                continue
+            compressed_text = truncate_context_text(original_text, max_chars=max_chars)
+            compression_metadata = {
+                **compression_metadata,
+                'matched': False,
+                'fallback_kept': True,
+                'compressed': len(compressed_text) < len(original_text),
+                'compression_ratio': len(compressed_text) / max(len(original_text), 1),
+            }
+
+        compressed_results.append({
+            **item,
+            'text': compressed_text,
+            'original_text_chars': len(original_text),
+            'contextual_compressed': bool(compression_metadata.get('compressed')),
+            'contextual_compression_matched': bool(compression_metadata.get('matched')),
+            'contextual_compression_score': compression_metadata.get('compression_score', 0),
+            'contextual_compression_ratio': compression_metadata.get('compression_ratio', 1),
+            'contextual_compression_fallback_kept': bool(compression_metadata.get('fallback_kept')),
+        })
+
+    return compressed_results or search_results[:candidate_limit]
+
+
+def parse_llm_compression_response(content):
+    content = str(content or '').strip()
+    if not content:
+        return []
+
+    start = content.find('[')
+    end = content.rfind(']')
+    if start < 0 or end < start:
+        return []
+
+    try:
+        data = json.loads(content[start:end + 1])
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    parsed_items = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get('index'))
+        except (TypeError, ValueError):
+            continue
+        compressed_text = str(item.get('compressed_text') or '').strip()
+        keep = bool(item.get('keep', True))
+        parsed_items.append({
+            'index': index,
+            'keep': keep,
+            'compressed_text': compressed_text,
+        })
+    return parsed_items
+
+
+def build_llm_compression_prompt(question, candidates, max_chars):
+    candidate_blocks = []
+    for index, item in enumerate(candidates, start=1):
+        text = truncate_context_text(item.get('text') or '', max_chars=1200)
+        metadata = [
+            f'index: {index}',
+            f"file_name: {item.get('file_name') or '未知文件'}",
+            f"page: {item.get('page') or ''}",
+            f"chunk_index: {item.get('chunk_index') or ''}",
+            f"text: {text}",
+        ]
+        candidate_blocks.append('\n'.join(metadata))
+
+    return f'''
+请根据用户问题，对候选资料片段做语义级上下文压缩。
+
+用户问题：
+{question}
+
+压缩要求：
+1. 只保留能直接帮助回答用户问题的原文信息。
+2. 可以删除无关句子，但不要改写、编造或补充资料中没有的信息。
+3. 工程名称、时间、金额、编号、尺寸、比例、结论性表述必须保持原样。
+4. 如果片段整体相关，可以保留关键段落；如果片段明显无关，keep 设为 false。
+5. 每个 compressed_text 控制在 {max_chars} 字以内。
+6. 只输出合法 JSON 数组，不要输出 Markdown，不要解释。
+
+输出格式：
+[
+  {{"index": 1, "keep": true, "compressed_text": "压缩后的相关原文"}},
+  {{"index": 2, "keep": false, "compressed_text": ""}}
+]
+
+候选资料：
+{chr(10).join(candidate_blocks)}
+'''.strip()
+
+
+def llm_contextual_compress_search_results(search_results, question):
+    if not getattr(settings, 'RAG_LLM_CONTEXT_COMPRESSION_ENABLED', True):
+        return search_results
+    if not settings.RAG_CHAT_API_KEY:
+        return search_results
+    if not is_circuit_allowed('context_compression'):
+        logger.warning('rag context compression circuit open, fallback to rule compression')
+        return search_results
+
+    candidate_limit = max(0, int(getattr(settings, 'RAG_LLM_CONTEXT_COMPRESSION_CANDIDATE_LIMIT', 5)))
+    min_chars = max(0, int(getattr(settings, 'RAG_LLM_CONTEXT_COMPRESSION_MIN_ITEM_CHARS', 350)))
+    max_chars = max(120, int(getattr(settings, 'RAG_LLM_CONTEXT_COMPRESSION_MAX_ITEM_CHARS', 700)))
+    min_keep_items = max(0, int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_MIN_KEEP_ITEMS', 6)))
+    model_name = getattr(settings, 'RAG_LLM_CONTEXT_COMPRESSION_MODEL', '') or settings.RAG_CHAT_MODEL
+
+    candidate_indexes = [
+        index
+        for index, item in enumerate(search_results[:candidate_limit])
+        if len(str(item.get('text') or '').strip()) >= min_chars
+    ]
+    if not candidate_indexes:
+        return search_results
+
+    candidates = [search_results[index] for index in candidate_indexes]
+    prompt = build_llm_compression_prompt(question, candidates, max_chars=max_chars)
+
+    try:
+        client = get_chat_client()
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': '你是 RAG 系统的上下文压缩器，只做忠实的信息抽取和无关内容过滤。',
+                },
+                {
+                    'role': 'user',
+                    'content': prompt,
+                },
+            ],
+            temperature=0,
+        )
+        record_component_success('context_compression')
+    except Exception as exc:
+        record_component_failure('context_compression', exc)
+        logger.warning('rag llm context compression degraded model=%s error=%r', model_name, exc)
+        return search_results
+
+    parsed_items = parse_llm_compression_response(response.choices[0].message.content)
+    if not parsed_items:
+        return search_results
+
+    parsed_map = {
+        item['index']: item
+        for item in parsed_items
+    }
+    compressed_results = []
+
+    for original_index, item in enumerate(search_results):
+        if original_index not in candidate_indexes:
+            compressed_results.append(item)
+            continue
+
+        llm_item_index = candidate_indexes.index(original_index) + 1
+        llm_item = parsed_map.get(llm_item_index)
+        if not llm_item:
+            compressed_results.append(item)
+            continue
+
+        compressed_text = truncate_context_text(llm_item.get('compressed_text') or '', max_chars=max_chars)
+        keep_item = llm_item.get('keep', True) and bool(compressed_text)
+        if not keep_item:
+            if len(compressed_results) < min_keep_items:
+                compressed_results.append({
+                    **item,
+                    'llm_contextual_compressed': False,
+                    'llm_contextual_compression_model': model_name,
+                    'llm_contextual_compression_fallback_kept': True,
+                })
+            continue
+
+        original_text = str(item.get('text') or '')
+        compressed_results.append({
+            **item,
+            'text': compressed_text,
+            'llm_contextual_compressed': len(compressed_text) < len(original_text),
+            'llm_contextual_compression_model': model_name,
+            'llm_contextual_compression_ratio': len(compressed_text) / max(len(original_text), 1),
+        })
+
+    return compressed_results or search_results
+
+
+def contextual_compress_search_results(search_results, question):
+    rule_results = rule_contextual_compress_search_results(search_results, question)
+    return llm_contextual_compress_search_results(rule_results, question)
+
+
 # 格式化每段资料
 def format_context_item(item, index):
     file_name = item.get('file_name') or '未知文件'
@@ -1832,6 +2493,21 @@ def format_context_item(item, index):
         metadata_lines.append(f'内容类型：{block_type}')
     if score is not None:
         metadata_lines.append(f'相关性分数：{float(score):.4f}')
+    if item.get('contextual_compressed'):
+        ratio = item.get('contextual_compression_ratio')
+        if ratio is not None:
+            metadata_lines.append(f'规则上下文压缩：已压缩，保留比例 {float(ratio):.2f}')
+        else:
+            metadata_lines.append('规则上下文压缩：已压缩')
+    if item.get('llm_contextual_compressed'):
+        ratio = item.get('llm_contextual_compression_ratio')
+        model_name = item.get('llm_contextual_compression_model')
+        if ratio is not None:
+            metadata_lines.append(f'LLM 上下文压缩：已压缩，保留比例 {float(ratio):.2f}')
+        else:
+            metadata_lines.append('LLM 上下文压缩：已压缩')
+        if model_name:
+            metadata_lines.append(f'LLM 压缩模型：{model_name}')
     text = truncate_context_text(item.get('text'))
     return '\n'.join(metadata_lines) + '\n内容：\n' + text
 
@@ -1887,6 +2563,7 @@ def get_chat_client():
     return OpenAI(
         api_key=settings.RAG_CHAT_API_KEY,
         base_url=settings.RAG_CHAT_BASE_URL,
+        timeout=getattr(settings, 'RAG_CHAT_TIMEOUT', 45),
     )
 
 # 查询不到信息时不显示来源
@@ -1934,157 +2611,109 @@ def normalize_chat_history(history, max_rounds=5, max_message_chars=300):
 
     return valid_messages[-max_rounds * 2:]
 
-# 根据历史问题进行 Query Rewrite
-def rewrite_question_with_history(question, history=None):
-    history = normalize_chat_history(history)
 
+def truncate_rag_memory_summary(summary, max_chars=None):
+    max_chars = max(0, int(max_chars or getattr(settings, 'RAG_CHAT_SUMMARY_MAX_CHARS', 2500)))
+    summary = str(summary or '').strip()
+    if not summary or max_chars <= 0:
+        return ''
+    return summary[:max_chars]
+
+
+def build_extractive_chat_summary(history):
+    history = normalize_chat_history(
+        history,
+        max_rounds=35,
+        max_message_chars=getattr(settings, 'RAG_CHAT_SUMMARY_SOURCE_MESSAGE_CHARS', 500),
+    )
     if not history:
-        return question
+        return ''
+
+    lines = ['以下是较早多轮对话的压缩摘要，用于理解用户后续追问的上下文：']
+    for index, item in enumerate(history, start=1):
+        speaker = '用户' if item['role'] == 'user' else '助手'
+        content = re.sub(r'\s+', ' ', item['content']).strip()
+        lines.append(f'{index}. {speaker}：{content}')
+
+    return truncate_rag_memory_summary('\n'.join(lines))
+
+
+def summarize_chat_history_for_memory(history, previous_summary=''):
+    history = normalize_chat_history(
+        history,
+        max_rounds=35,
+        max_message_chars=getattr(settings, 'RAG_CHAT_SUMMARY_SOURCE_MESSAGE_CHARS', 500),
+    )
+    if not history:
+        return truncate_rag_memory_summary(previous_summary)
 
     history_text = '\n'.join(
         f"{'用户' if item['role'] == 'user' else '助手'}：{item['content']}"
         for item in history
     )
+    previous_summary = truncate_rag_memory_summary(previous_summary)
+
+    if not settings.RAG_CHAT_API_KEY:
+        return build_extractive_chat_summary(history)
+
+    if not is_circuit_allowed('chat_model'):
+        logger.warning('rag chat model circuit open, use extractive memory summary')
+        return build_extractive_chat_summary(history)
 
     prompt = f'''
-请根据历史对话，把用户当前问题改写成一个完整、独立、适合项目文档检索的问题。
+请把下面较早的项目文档问答历史压缩成长期记忆摘要，供后续多轮 RAG 问答理解上下文。
 
 要求：
-1. 只改写问题，不要回答问题。
-2. 保留用户当前问题的真实意图。
-3. 如果当前问题中有“它”“这个方法”“上面那个”等指代，请根据历史对话补全。
-4. 不要添加历史对话中没有依据的新结论。
-5. 输出一句改写后的问题。
+1. 保留用户长期关注的对象、问题、约束、结论、待确认事项。
+2. 不要编造历史中没有的信息。
+3. 去掉寒暄、重复表达和无关细节。
+4. 用中文输出，控制在 {getattr(settings, 'RAG_CHAT_SUMMARY_MAX_CHARS', 2500)} 字以内。
+5. 输出摘要正文即可，不要添加标题。
 
-历史对话：
+已有摘要：
+{previous_summary or '无'}
+
+较早对话原文：
 {history_text}
 
-用户当前问题：
-{question}
-
-改写后的独立问题：
+长期记忆摘要：
 '''.strip()
 
-    client = get_chat_client()
+    try:
+        client = get_chat_client()
+        response = client.chat.completions.create(
+            model=settings.RAG_CHAT_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': '你是项目文档问答系统的长对话记忆压缩器，只负责忠实摘要历史对话。',
+                },
+                {
+                    'role': 'user',
+                    'content': prompt,
+                },
+            ],
+            temperature=0,
+        )
+        record_component_success('chat_model')
+    except Exception as exc:
+        record_component_failure('chat_model', exc)
+        logger.warning('rag memory summary degraded error=%r', exc)
+        return build_extractive_chat_summary(history)
 
-    response = client.chat.completions.create(
-        model=settings.RAG_CHAT_MODEL,
-        messages=[
-            {
-                'role': 'system',
-                'content': '你是一个项目文档问答系统中的查询改写助手，只负责改写检索问题。',
-            },
-            {
-                'role': 'user',
-                'content': prompt,
-            },
-        ],
-        temperature=0,
-    )
+    summary = response.choices[0].message.content.strip()
+    if not summary:
+        return build_extractive_chat_summary(history)
 
-    rewritten = response.choices[0].message.content.strip()
+    return truncate_rag_memory_summary(summary)
 
-    if not rewritten:
-        return question
 
-    return rewritten
-
-# 输出回答
-def answer_question_with_rag(question, project_id=None, limit=8, history=None):
-    standalone_question = rewrite_question_with_history(question, history)
-    search_results = hybrid_search_file_chunks(
-        question=standalone_question,
-        project_id=project_id,
-        final_limit=limit,
-    )
-    search_results = expand_search_results_with_neighbors(
-        search_results,
-        neighbor_size=1,
-        allowed_extensions={'.pdf'},
-    )
-
-    context, packed_results = pack_rag_context(search_results, question=standalone_question)
-
-    if not context:
-        yield {
-            'type': 'delta',
-            'content': '没有在项目文件中检索到相关内容。',
-        }
-        yield {
-            'type': 'done',
-            'sources': [],
-        }
-        return
-
-    prompt = f'''
-    你是一个严谨的项目文档问答助手。请只根据下面提供的参考资料回答用户问题。
-
-    回答要求：
-    1. 只能根据参考资料回答，不要使用资料外知识。
-    2. 每个关键结论后必须标注来源编号，例如：[资料1]、[资料2]。
-    3. 如果参考资料无法支持答案，请只回答“资料中没有找到相关信息”。
-    4. 不要引用没有实际使用的资料编号。
-    5. 回答要清晰、简洁，优先使用中文。
-
-    用户原始问题：
-    {question}
-
-    用于检索的独立问题：
-    {standalone_question}
-
-    参考资料：
-    {context}
-    '''.strip()
-
-    client = get_chat_client()
-
-    stream = client.chat.completions.create(
-        model=settings.RAG_CHAT_MODEL,
-        messages=[
-            {
-                'role': 'system',
-                'content': '你是一个严谨的项目文档问答助手，只能基于给定资料回答。',
-            },
-            {
-                'role': 'user',
-                'content': prompt,
-            },
-        ],
-        temperature=0.2,
-        stream=True,
-    )
-
-    answer_parts = []
-
-    for chunk in stream:
-        choices = getattr(chunk, 'choices', None) or []
-        if not choices:
-            continue
-
-        delta = getattr(choices[0], 'delta', None)
-        content = getattr(delta, 'content', None)
-        if content:
-            answer_parts.append(content)
-            yield {
-                'type': 'delta',
-                'content': content,
-            }
-
-    if should_hide_sources_for_answer(''.join(answer_parts)):
-        packed_results = []
-
-    answer_text = ''.join(answer_parts)
-
-    if should_hide_sources_for_answer(answer_text):
-        packed_results = []
-
-    cited_indexes = extract_cited_source_indexes(answer_text)
-
+def build_rag_sources(packed_results, cited_indexes=None, include_uncited=False):
     sources = []
     seen = set()
 
     for source_index, item in enumerate(packed_results, start=1):
-        if source_index not in cited_indexes:
+        if cited_indexes is not None and source_index not in cited_indexes and not include_uncited:
             continue
 
         key = (
@@ -2105,7 +2734,246 @@ def answer_question_with_rag(question, project_id=None, limit=8, history=None):
             'page': item.get('page'),
             'sheet_name': item.get('sheet_name'),
         })
+
+    return sources
+
+
+def build_retrieval_fallback_answer(packed_results, max_items=5):
+    if not packed_results:
+        return '模型服务暂时不可用，并且没有检索到可用于降级回答的项目资料。'
+
+    lines = [
+        '模型服务暂时不可用，系统已降级为检索结果摘要。以下内容仅基于召回片段，建议恢复模型后重新提问：'
+    ]
+    for index, item in enumerate(packed_results[:max_items], start=1):
+        text = re.sub(r'\s+', ' ', item.get('text') or '').strip()
+        if len(text) > 220:
+            text = text[:220] + '...'
+        file_name = item.get('file_name') or '未知文件'
+        page = item.get('page')
+        location = f'，页码：{page}' if page else ''
+        lines.append(f'{index}. {file_name}{location}：{text}')
+
+    return '\n'.join(lines)
+
+
+def yield_retrieval_fallback(reason, packed_results):
+    logger.warning('rag chat degraded reason=%s', reason)
+    yield {
+        'type': 'notice',
+        'code': 'rag_degraded',
+        'message': reason,
+    }
+    yield {
+        'type': 'delta',
+        'content': build_retrieval_fallback_answer(packed_results),
+    }
     yield {
         'type': 'done',
-        'sources': sources,
+        'sources': build_rag_sources(packed_results, include_uncited=True),
+        'degraded': True,
+        'degrade_reason': reason,
+    }
+
+# 根据历史问题进行 Query Rewrite
+def rewrite_question_with_history(question, history=None, history_summary=''):
+    history = normalize_chat_history(history)
+    history_summary = truncate_rag_memory_summary(history_summary)
+
+    if not history and not history_summary:
+        return question
+    if not is_circuit_allowed('chat_model'):
+        logger.warning('rag chat model circuit open, skip query rewrite')
+        return question
+
+    history_text = '\n'.join(
+        f"{'用户' if item['role'] == 'user' else '助手'}：{item['content']}"
+        for item in history
+    )
+
+    prompt = f'''
+请根据长期摘要和最近对话，把用户当前问题改写成一个完整、独立、适合项目文档检索的问题。
+
+要求：
+1. 只改写问题，不要回答问题。
+2. 保留用户当前问题的真实意图。
+3. 如果当前问题中有“它”“这个方法”“上面那个”等指代，请根据历史对话补全。
+4. 不要添加历史对话中没有依据的新结论。
+5. 输出一句改写后的问题。
+
+长期摘要：
+{history_summary or '无'}
+
+最近对话：
+{history_text or '无'}
+
+用户当前问题：
+{question}
+
+改写后的独立问题：
+'''.strip()
+
+    try:
+        client = get_chat_client()
+
+        response = client.chat.completions.create(
+            model=settings.RAG_CHAT_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': '你是一个项目文档问答系统中的查询改写助手，只负责改写检索问题。',
+                },
+                {
+                    'role': 'user',
+                    'content': prompt,
+                },
+            ],
+            temperature=0,
+        )
+        record_component_success('chat_model')
+    except Exception as exc:
+        record_component_failure('chat_model', exc)
+        logger.warning('rag query rewrite degraded error=%r', exc)
+        return question
+
+    rewritten = response.choices[0].message.content.strip()
+
+    if not rewritten:
+        return question
+
+    return rewritten
+
+# 输出回答
+def answer_question_with_rag(question, project_id=None, limit=8, history=None, history_summary=''):
+    standalone_question = rewrite_question_with_history(question, history, history_summary)
+    compression_candidate_limit = max(
+        limit,
+        int(getattr(settings, 'RAG_CONTEXT_COMPRESSION_CANDIDATE_LIMIT', 16)),
+    )
+    search_results = hybrid_search_file_chunks(
+        question=standalone_question,
+        project_id=project_id,
+        final_limit=compression_candidate_limit,
+    )
+    search_results = expand_search_results_with_neighbors(
+        search_results,
+        neighbor_size=1,
+        allowed_extensions={'.pdf'},
+    )
+    search_results = contextual_compress_search_results(search_results, question=standalone_question)
+
+    context, packed_results = pack_rag_context(search_results, question=standalone_question)
+
+    if not context:
+        yield {
+            'type': 'delta',
+            'content': '没有在项目文件中检索到相关内容。',
+        }
+        yield {
+            'type': 'done',
+            'sources': [],
+        }
+        return
+
+    recent_history = normalize_chat_history(history)
+    memory_summary = truncate_rag_memory_summary(history_summary)
+    recent_history_text = '\n'.join(
+        f"{'用户' if item['role'] == 'user' else '助手'}：{item['content']}"
+        for item in recent_history
+    )
+    conversation_memory = f'''
+    长期摘要：
+    {memory_summary or '无'}
+
+    最近对话：
+    {recent_history_text or '无'}
+    '''.strip()
+
+    prompt = f'''
+    你是一个严谨的项目文档问答助手。请只根据下面提供的参考资料回答用户问题。
+
+    回答要求：
+    1. 只能根据参考资料回答，不要使用资料外知识。
+    2. 每个关键结论后必须标注来源编号，例如：[资料1]、[资料2]。
+    3. 如果参考资料无法支持答案，请只回答“资料中没有找到相关信息”。
+    4. 不要引用没有实际使用的资料编号。
+    5. 回答要清晰、简洁，优先使用中文。
+    6. 对话记忆只能用于理解当前问题指代，不可作为项目事实依据。
+
+    用户原始问题：
+    {question}
+
+    用于检索的独立问题：
+    {standalone_question}
+
+    对话记忆：
+    {conversation_memory}
+
+    参考资料：
+    {context}
+    '''.strip()
+
+    if not is_circuit_allowed('chat_model'):
+        yield from yield_retrieval_fallback('回答模型熔断中，已降级为检索结果摘要', packed_results)
+        return
+
+    try:
+        client = get_chat_client()
+
+        stream = client.chat.completions.create(
+            model=settings.RAG_CHAT_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': '你是一个严谨的项目文档问答助手，只能基于给定资料回答。',
+                },
+                {
+                    'role': 'user',
+                    'content': prompt,
+                },
+            ],
+            temperature=0.2,
+            stream=True,
+        )
+    except Exception as exc:
+        record_component_failure('chat_model', exc)
+        yield from yield_retrieval_fallback('回答模型请求失败，已降级为检索结果摘要', packed_results)
+        return
+
+    answer_parts = []
+
+    try:
+        for chunk in stream:
+            choices = getattr(chunk, 'choices', None) or []
+            if not choices:
+                continue
+
+            delta = getattr(choices[0], 'delta', None)
+            content = getattr(delta, 'content', None)
+            if content:
+                answer_parts.append(content)
+                yield {
+                    'type': 'delta',
+                    'content': content,
+                }
+    except Exception as exc:
+        record_component_failure('chat_model', exc)
+        yield from yield_retrieval_fallback('回答模型流式输出中断，已降级为检索结果摘要', packed_results)
+        return
+
+    record_component_success('chat_model')
+
+    if should_hide_sources_for_answer(''.join(answer_parts)):
+        packed_results = []
+
+    answer_text = ''.join(answer_parts)
+
+    if should_hide_sources_for_answer(answer_text):
+        packed_results = []
+
+    cited_indexes = extract_cited_source_indexes(answer_text)
+
+    yield {
+        'type': 'done',
+        'sources': build_rag_sources(packed_results, cited_indexes=cited_indexes),
     }

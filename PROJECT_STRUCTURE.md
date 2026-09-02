@@ -44,7 +44,12 @@ backend/
     admin.py               Django Admin 配置
     response.py            统一响应封装
     services/              服务层
-      langchain_rag_service.py     RAG 核心服务，目前最需要拆分
+      langchain_rag_service.py     RAG 编排入口，仍包含文件解析、入库、检索、生成等主流程
+      rag/                         RAG 子模块，已拆出文本工具、Multi-Query 和上下文压缩
+        text_utils.py              关键词提取、上下文截断、表格/图注文本识别
+        multi_query.py             Multi-Query 生成、查询清洗去重、RRF 融合
+        compression.py             保守规则压缩 + LLM 语义压缩
+        memory.py                  长对话历史清洗、摘要记忆、查询改写
       elasticsearch_service.py     Elasticsearch / BM25 关键词检索与审计日志索引
       rag_resilience_service.py    RAG 限流、并发槽、熔断、降级
       cache_service.py             Redis API 缓存
@@ -220,15 +225,15 @@ app01/views/
 
 低风险做法：先拆 RAG 和文件接口，因为它们现在是项目亮点，复习价值最高。
 
-### 8.2 `langchain_rag_service.py` 过大
+### 8.2 `langchain_rag_service.py` 仍然偏大
 
 问题：
 
-- RAG 能力很完整，但都堆在一个服务文件中；
-- 后续复习 Multi-Query、压缩、rerank、入库时需要在大文件里上下滚动；
-- 不利于表现“模块化 RAG 工程”。
+- 已经拆出 `rag/text_utils.py`、`rag/multi_query.py`、`rag/compression.py`、`rag/memory.py`；
+- 主服务文件仍包含文件解析、切分、向量入库、邻居扩展、rerank 和最终生成；
+- 后续复习 rerank、入库、生成时仍需要在大文件里上下滚动。
 
-建议后续拆成：
+建议后续继续拆成：
 
 ```text
 app01/services/rag/
@@ -236,14 +241,14 @@ app01/services/rag/
   splitters.py        文档切分
   vector_store.py     Qdrant、Embedding、入库、删除
   keyword_store.py    Elasticsearch/BM25，可继续复用 elasticsearch_service.py
-  retrieval.py        Multi-Query、混合检索、RRF
+  retrieval.py        混合检索主编排、Qdrant/ES 召回聚合
   rerank.py           规则 rerank、模型 rerank
-  compression.py      规则压缩、LLM 压缩
-  memory.py           长对话摘要记忆
+  compression.py      规则压缩、LLM 压缩（已拆）
+  memory.py           长对话摘要记忆（已拆）
   generation.py       最终回答生成
 ```
 
-低风险做法：先不拆运行代码，先在文档里画清楚链路。真正拆文件要配合测试逐步做。
+低风险做法：继续按“拆一块、跑一组测试、提交一次”的节奏推进，优先拆 rerank 和 memory。
 
 ### 8.3 `tests.py` 开始变大
 
@@ -332,7 +337,7 @@ backend/requirements-dev.txt
 2. 清理并提交临时文件删除项和 `.gitignore`。
 3. 确认新增迁移、服务文件、评测脚本、压测脚本都已纳入 Git。
 4. 跑一次后端检查、关键测试、前端 build。
-5. 如果还有时间，再小步拆分 `langchain_rag_service.py` 中的 RAG 子模块。
+5. 已小步拆出 `langchain_rag_service.py` 中的文本工具、Multi-Query、上下文压缩、长对话记忆子模块。
 6. 最后再考虑拆 `views.py`，因为它牵涉 URL、导入和接口较多，风险更高。
 
 ## 11. 面试讲解建议

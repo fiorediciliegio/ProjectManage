@@ -165,8 +165,9 @@ ProjectManage
 │   ├── app01                    # 核心业务应用
 │   │   ├── models.py            # 数据模型
 │   │   ├── serializers.py       # 接口序列化
-│   │   ├── views.py             # 业务接口
-│   │   └── services             # RAG 与 Elasticsearch 服务
+│   │   ├── views.py             # 接口兼容导出层
+│   │   ├── views_modules        # 按业务域拆分的接口实现
+│   │   └── services             # RAG、Elasticsearch、缓存、分页等服务
 │   ├── manage.py
 │   ├── requirements.txt
 │   └── .env.example

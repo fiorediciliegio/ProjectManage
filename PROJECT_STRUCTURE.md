@@ -4,14 +4,14 @@
 
 ## 1. 总体判断
 
-当前项目不是乱到无法维护，但已经进入“功能复杂度高于目录组织清晰度”的阶段。
+当前项目已经完成一轮接口层和 RAG 服务层模块化整理，目录结构比早期单文件堆叠状态清晰很多。
 
-优点是顶层前后端分离明确，后端也已经形成 `models / serializers / services / tasks / views` 的基本 Django 分层。问题主要集中在两个大文件：
+优点是顶层前后端分离明确，后端也已经形成 `models / serializers / services / tasks / views_modules` 的基本 Django 分层。此前最影响理解的两个大文件已经完成拆分：
 
-- `backend/app01/views.py`：接口函数过于集中，包含项目、人员、成本、质量、安全、文件、RAG 等大量接口。
-- `backend/app01/services/langchain_rag_service.py`：RAG 相关能力很完整，但文件解析、切分、向量入库、检索、重排、压缩、生成都放在一个文件里。
+- `backend/app01/views.py`：已改为兼容导出层，业务接口拆到 `backend/app01/views_modules/`。
+- `backend/app01/services/langchain_rag_service.py`：已改为 RAG 兼容导出层，核心实现拆到 `backend/app01/services/rag/`。
 
-这不会阻止项目写进简历，但会影响复习效率。如果面试官要求打开代码讲实现，最好提前准备这份模块地图。
+这更适合用于简历和面试讲解。如果面试官要求打开代码讲实现，可以直接按本文档的模块地图说明。
 
 ## 2. 当前顶层目录
 
@@ -38,7 +38,16 @@ backend/
   app01/                   主要业务应用
     models.py              数据模型：项目、人员、文件、RAG 会话、审计日志等
     serializers.py         DRF 序列化器
-    views.py               业务接口，目前最需要拆分的大文件
+    views.py               业务接口兼容导出层，旧路由入口仍可使用
+    views_modules/         业务接口模块，按领域拆分
+      common.py            登录、权限、审计日志、公共响应/模型导入
+      project_views.py     项目与项目节点接口
+      person_views.py      人员与项目成员接口
+      cost_views.py        成本接口与统计
+      quality_views.py     质量模板、报告、统计接口
+      safety_views.py      安全模板、报告、问题处理接口
+      file_views.py        文件上传、预览、下载、删除接口
+      rag_views.py         RAG 入库、取消、状态、会话、多轮问答接口
     tasks.py               Celery 异步任务，主要包含 RAG 文件入库/删除/取消等
     middleware.py          性能日志中间件
     admin.py               Django Admin 配置
@@ -212,19 +221,20 @@ backend/evaluation/
 
 ## 8. 当前最影响理解的结构问题
 
-### 8.1 `views.py` 过大
+### 8.1 `views.py` 已完成接口层拆分
 
 问题：
 
-- 所有业务接口集中在一个文件；
-- 很难快速定位某个业务模块；
-- 面试时不利于体现接口层分模块组织。
+- `views.py` 已改为兼容导出层；
+- 具体业务接口已按领域拆到 `views_modules/`；
+- `Projectmanagement/urls.py` 仍然从 `app01 import views` 导入，路由入口保持稳定。
 
-建议后续拆成：
+当前拆分结果：
 
 ```text
-app01/views/
-  auth_views.py
+app01/views.py              兼容导出层
+app01/views_modules/
+  common.py
   project_views.py
   person_views.py
   cost_views.py
@@ -234,7 +244,7 @@ app01/views/
   rag_views.py
 ```
 
-低风险做法：先拆 RAG 和文件接口，因为它们现在是项目亮点，复习价值最高。
+低风险做法：已经采用“保留旧入口 + 拆实现模块”的方式完成，避免一次性改动 URL 路由。
 
 ### 8.2 RAG 服务已经完成第一轮模块化
 
@@ -353,8 +363,8 @@ backend/requirements-dev.txt
 2. 清理并提交临时文件删除项和 `.gitignore`。
 3. 确认新增迁移、服务文件、评测脚本、压测脚本都已纳入 Git。
 4. 跑一次后端检查、关键测试、前端 build。
-5. 已小步拆出 `langchain_rag_service.py` 中的文本工具、Multi-Query、上下文压缩、长对话记忆子模块。
-6. 最后再考虑拆 `views.py`，因为它牵涉 URL、导入和接口较多，风险更高。
+5. 已完成 `langchain_rag_service.py` 的 RAG 子模块拆分。
+6. 已完成 `views.py` 的接口层拆分，并保留旧路由入口。
 
 ## 11. 面试讲解建议
 

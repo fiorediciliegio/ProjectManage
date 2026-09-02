@@ -54,3 +54,7 @@ backend/.paddlex/
 
 # Logs
 *.log
+
+# Load test generated reports
+backend/load_tests/reports/*
+!backend/load_tests/reports/.gitkeep

@@ -44,12 +44,23 @@ backend/
     admin.py               Django Admin 配置
     response.py            统一响应封装
     services/              服务层
-      langchain_rag_service.py     RAG 编排入口，仍包含文件解析、入库、检索、生成等主流程
-      rag/                         RAG 子模块，已拆出文本工具、Multi-Query 和上下文压缩
+      langchain_rag_service.py     RAG 兼容导出层，旧导入路径仍可使用
+      rag/                         RAG 子模块，按检索、压缩、记忆、生成、入库等职责拆分
+        loaders.py                 文件类型分发、文档加载入口、chunk 预览入口
+        blocks.py                  语义 block、Document 转换、短片段合并
+        file_parsers.py            纯文本、Word、Excel 文件解析
+        pdf_parser.py              PDF 正文、表格、页眉页脚、扫描页 OCR 解析
+        image_parser.py            图片 OCR 解析
+        splitters.py               不同文件类型的 chunk 切分策略
+        vector_store.py            Embedding 适配器、Qdrant 入库/删除/查询、ES 同步索引
+        retrieval.py               混合检索主编排：Multi-Query、多路召回、RRF、rerank
+        rerank.py                  规则 rerank、模型 rerank、分数融合
         text_utils.py              关键词提取、上下文截断、表格/图注文本识别
         multi_query.py             Multi-Query 生成、查询清洗去重、RRF 融合
         compression.py             保守规则压缩 + LLM 语义压缩
         memory.py                  长对话历史清洗、摘要记忆、查询改写
+        generation.py              最终回答生成、流式输出、来源整理、降级回答
+        llm_client.py              OpenAI-compatible 聊天模型客户端创建
       elasticsearch_service.py     Elasticsearch / BM25 关键词检索与审计日志索引
       rag_resilience_service.py    RAG 限流、并发槽、熔断、降级
       cache_service.py             Redis API 缓存
@@ -225,30 +236,35 @@ app01/views/
 
 低风险做法：先拆 RAG 和文件接口，因为它们现在是项目亮点，复习价值最高。
 
-### 8.2 `langchain_rag_service.py` 仍然偏大
+### 8.2 RAG 服务已经完成第一轮模块化
 
 问题：
 
-- 已经拆出 `rag/text_utils.py`、`rag/multi_query.py`、`rag/compression.py`、`rag/memory.py`；
-- 主服务文件仍包含文件解析、切分、向量入库、邻居扩展、rerank 和最终生成；
-- 后续复习 rerank、入库、生成时仍需要在大文件里上下滚动。
+- `langchain_rag_service.py` 已改为兼容导出层，负责维持旧导入路径稳定；
+- 主要 RAG 实现已经拆到 `app01/services/rag/`；
+- `loaders.py` 已进一步细拆为 block、文件解析、PDF/OCR、图片 OCR、切分策略等子模块。
 
-建议后续继续拆成：
+当前拆分结果：
 
 ```text
 app01/services/rag/
-  loaders.py          文件解析
-  splitters.py        文档切分
-  vector_store.py     Qdrant、Embedding、入库、删除
-  keyword_store.py    Elasticsearch/BM25，可继续复用 elasticsearch_service.py
-  retrieval.py        混合检索主编排、Qdrant/ES 召回聚合
-  rerank.py           规则 rerank、模型 rerank
+  loaders.py          文件加载入口（已拆）
+  blocks.py           语义 block 与 Document 转换（已拆）
+  file_parsers.py     文本、Word、Excel 解析（已拆）
+  pdf_parser.py       PDF 与 OCR 解析（已拆）
+  image_parser.py     图片 OCR 解析（已拆）
+  splitters.py        文档切分（已拆）
+  vector_store.py     Qdrant、Embedding、入库、删除（已拆）
+  elasticsearch_service.py  Elasticsearch/BM25 仍复用原服务文件
+  retrieval.py        混合检索主编排、Qdrant/ES 召回聚合（已拆）
+  rerank.py           规则 rerank、模型 rerank（已拆）
   compression.py      规则压缩、LLM 压缩（已拆）
   memory.py           长对话摘要记忆（已拆）
-  generation.py       最终回答生成
+  generation.py       最终回答生成（已拆）
+  llm_client.py       OpenAI-compatible 客户端（已拆）
 ```
 
-低风险做法：继续按“拆一块、跑一组测试、提交一次”的节奏推进，优先拆 rerank 和 memory。
+低风险做法：后续如继续重构，优先拆 `views.py` 或把 `loaders.py` 再按 PDF / Word / Excel / OCR 细分。
 
 ### 8.3 `tests.py` 开始变大
 

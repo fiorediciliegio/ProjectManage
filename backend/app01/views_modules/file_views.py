@@ -339,5 +339,3 @@ def rest_files(request, file_id):
         return error_response(message=str(e), status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # 文件入 Qdrant 库
-ACTIVE_RAG_TASK_STATUSES = {'queued', 'running', 'retrying', 'cancelling', 'deleting'}
-CANCELLABLE_RAG_TASK_STATUSES = {'queued', 'running', 'retrying'}

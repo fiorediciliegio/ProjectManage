@@ -76,6 +76,10 @@ from app01.services.rag_resilience_service import (
     release_rag_chat_admission,
 )
 
+
+ACTIVE_RAG_TASK_STATUSES = {'queued', 'running', 'retrying', 'cancelling', 'deleting'}
+CANCELLABLE_RAG_TASK_STATUSES = {'queued', 'running', 'retrying'}
+
 # ———————————————————— 登录 ————————————————————
 # 登录
 @api_view(['POST'])

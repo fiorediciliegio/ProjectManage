@@ -29,6 +29,7 @@ const normalizeUser = (userData) => {
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
     const bootstrapAuth = async () => {
@@ -38,6 +39,8 @@ export const AuthProvider = ({ children }) => {
         setUser(normalizeUser(response.data?.data));
       } catch (error) {
         setUser(null);
+      } finally {
+        setAuthLoading(false);
       }
     };
 
@@ -59,7 +62,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, apiBaseUrl: API_BASE_URL }}>
+    <AuthContext.Provider value={{ user, authLoading, login, logout, apiBaseUrl: API_BASE_URL }}>
       {children}
     </AuthContext.Provider>
   );

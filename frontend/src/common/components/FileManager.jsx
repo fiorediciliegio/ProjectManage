@@ -3,6 +3,7 @@ import {
   Button,
   List,
   ListItem,
+  ListItemButton,
   ListItemText,
   IconButton,
   Dialog,
@@ -14,6 +15,7 @@ import {
   Typography,
   Checkbox,
   Chip,
+  Divider,
   Snackbar,
   TextField,
   CircularProgress,
@@ -129,6 +131,22 @@ const normalizeRagMessages = (messages) => (messages || [])
     error: Boolean(message.metadata?.error),
   }));
 
+const formatRagSessionTime = (value) => {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value).slice(0, 16);
+  }
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
 export default function FileManager({ projectId }) {
   const [files, setFiles] = useState([]);
   const [filePage, setFilePage] = useState(0);
@@ -146,6 +164,7 @@ export default function FileManager({ projectId }) {
   const [imagePreviewErrors, setImagePreviewErrors] = useState({});
   const [ragQuestion, setRagQuestion] = useState('');
   const [ragMessages, setRagMessages] = useState([]);
+  const [ragSessions, setRagSessions] = useState([]);
   const [ragSessionId, setRagSessionId] = useState(null);
   const [ragSessionTitle, setRagSessionTitle] = useState('');
   const [ragSessionLoading, setRagSessionLoading] = useState(false);
@@ -214,7 +233,7 @@ export default function FileManager({ projectId }) {
     setRagMessages(normalizeRagMessages(data.messages));
   }, [projectId]);
 
-  const loadLatestRagSession = useCallback(async () => {
+  const loadRagSessions = useCallback(async (selectLatest = false) => {
     if (!projectId) {
       return;
     }
@@ -223,31 +242,42 @@ export default function FileManager({ projectId }) {
       const response = await axios.get(`/projects/${projectId}/rag/sessions/`, {
         params: {
           page: 1,
-          page_size: 1,
+          page_size: 50,
         },
       });
       const sessions = response.data?.data?.sessions || [];
-      if (sessions.length > 0) {
+      setRagSessions(sessions);
+      if (selectLatest && sessions.length > 0) {
         await loadRagSessionMessages(sessions[0].session_id);
-      } else {
+      } else if (selectLatest) {
         setRagSessionId(null);
         setRagSessionTitle('');
         setRagMessages([]);
       }
     } catch (error) {
-      console.error('Error loading RAG session:', error);
+      console.error('Error loading RAG sessions:', error);
     } finally {
       setRagSessionLoading(false);
     }
   }, [projectId, loadRagSessionMessages]);
+
+  const upsertRagSession = useCallback((session) => {
+    if (!session?.session_id) {
+      return;
+    }
+    setRagSessions((prev) => {
+      const next = prev.filter((item) => item.session_id !== session.session_id);
+      return [session, ...next];
+    });
+  }, []);
 
   useEffect(() => {
     fetchFiles(filePage, fileRowsPerPage);
   }, [projectId, filePage, fileRowsPerPage]);
 
   useEffect(() => {
-    loadLatestRagSession();
-  }, [loadLatestRagSession]);
+    loadRagSessions(true);
+  }, [loadRagSessions]);
 
   useEffect(() => {
     if (!files.some((file) => activeIndexStatuses.has(file.index_status))) {
@@ -271,6 +301,49 @@ export default function FileManager({ projectId }) {
     setRagSessionTitle('');
     setRagMessages([]);
     setRagQuestion('');
+  };
+
+  const handleSelectRagSession = async (sessionId) => {
+    if (!sessionId || ragLoading || sessionId === ragSessionId) {
+      return;
+    }
+    setRagSessionLoading(true);
+    try {
+      await loadRagSessionMessages(sessionId);
+    } catch (error) {
+      console.error('Error selecting RAG session:', error);
+      showSnackbar(await getErrorMessage(error, '加载历史对话失败'), 'error');
+    } finally {
+      setRagSessionLoading(false);
+    }
+  };
+
+  const handleDeleteRagSession = async (event, sessionId) => {
+    event.stopPropagation();
+    if (!sessionId || ragLoading) {
+      return;
+    }
+
+    setRagSessionLoading(true);
+    try {
+      await axios.delete(`/projects/${projectId}/rag/sessions/${sessionId}/`);
+      const nextSessions = ragSessions.filter((session) => session.session_id !== sessionId);
+      setRagSessions(nextSessions);
+      showSnackbar('历史对话已删除');
+
+      if (sessionId === ragSessionId) {
+        if (nextSessions.length > 0) {
+          await loadRagSessionMessages(nextSessions[0].session_id);
+        } else {
+          handleNewRagSession();
+        }
+      }
+    } catch (error) {
+      console.error('Error deleting RAG session:', error);
+      showSnackbar(await getErrorMessage(error, '删除历史对话失败'), 'error');
+    } finally {
+      setRagSessionLoading(false);
+    }
   };
 
   const handleUpload = (event) => {
@@ -512,6 +585,7 @@ export default function FileManager({ projectId }) {
             if (event.session?.title) {
               setRagSessionTitle(event.session.title);
             }
+            upsertRagSession(event.session);
           }
 
           if (event.type === 'delta') {
@@ -560,6 +634,7 @@ export default function FileManager({ projectId }) {
       });
     } finally {
       setRagLoading(false);
+      loadRagSessions(false);
     }
   };
   const handleRagKeyDown = (event) => {
@@ -853,83 +928,156 @@ export default function FileManager({ projectId }) {
                   </Typography>
                 )}
               </Box>
-              <Tooltip title="新对话">
-                <span>
-                  <IconButton size="small" onClick={handleNewRagSession} disabled={ragLoading || ragSessionLoading}>
-                    <RestartAlt fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
             </Box>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              {'\u5148\u9009\u62e9\u6587\u4ef6\u70b9\u51fb\u201c\u5165\u5e93\u201d\uff0c\u518d\u6839\u636e\u9879\u76ee\u6587\u6863\u63d0\u95ee\u3002'}
-            </Typography>
-            <Box sx={{ flex: 1, overflowY: 'auto', pr: 1, mb: 2, borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
-              {ragSessionLoading ? (
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 2 }}>
-                  <CircularProgress size={18} />
-                  <Typography variant="body2" color="text.secondary">正在加载历史对话...</Typography>
-                </Box>
-              ) : ragMessages.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                  {'\u6682\u65e0\u5bf9\u8bdd\uff0c\u53ef\u4ee5\u8be2\u95ee\u201c\u8fd9\u4e2a\u9879\u76ee\u6587\u4ef6\u4e3b\u8981\u8bb2\u4e86\u4ec0\u4e48\uff1f\u201d\u6216\u201c\u8d28\u91cf\u68c0\u67e5\u6709\u54ea\u4e9b\u8981\u6c42\uff1f\u201d\u3002'}
+            <Box sx={{ flex: 1, display: 'flex', gap: 1.5, minHeight: 0 }}>
+              <Box sx={{ width: 190, flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<RestartAlt />}
+                  onClick={handleNewRagSession}
+                  disabled={ragLoading || ragSessionLoading}
+                  sx={{ mb: 1 }}
+                >
+                  新对话
+                </Button>
+                <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5 }}>
+                  历史对话
                 </Typography>
-              ) : (
-                ragMessages.map((message, index) => (
-                  <Box
-                    key={`${message.role}-${index}`}
-                    sx={{ my: 1.5, display: 'flex', justifyContent: message.role === 'user' ? 'flex-end' : 'flex-start' }}
-                  >
-                    <Paper
-                      variant="outlined"
-                      sx={{
-                        maxWidth: '88%',
-                        p: 1.5,
-                        bgcolor: message.role === 'user' ? '#e3f2fd' : '#fafafa',
-                        borderColor: message.error ? '#ef9a9a' : '#e0e0e0',
-                      }}
-                    >
-                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{message.content}</Typography>
-                      {message.sources?.length > 0 && (
-                        <Box sx={{ mt: 1 }}>
-                          <Typography variant="caption" color="text.secondary">{'\u6765\u6e90\uff1a'}</Typography>
-                          {message.sources.map((source, sourceIndex) => (
-                            <Typography
-                              key={`${source.file_id}-${source.chunk_index}-${sourceIndex}`}
-                              variant="caption"
-                              color="text.secondary"
-                              display="block"
-                            >
-                              {source.file_name}{'\uff08\u7247\u6bb5 '}{source.chunk_index}{'\uff09'}
-                            </Typography>
-                          ))}
-                        </Box>
-                      )}
-                    </Paper>
-                  </Box>
-                ))
-              )}
-              {ragLoading && (
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 1 }}>
-                  <CircularProgress size={18} />
-                  <Typography variant="body2" color="text.secondary">{'\u6b63\u5728\u68c0\u7d22\u9879\u76ee\u6587\u6863\u5e76\u751f\u6210\u56de\u7b54...'}</Typography>
+                <List dense sx={{ flex: 1, overflowY: 'auto', pr: 0.5 }}>
+                  {ragSessions.length === 0 ? (
+                    <Typography variant="caption" color="text.secondary">
+                      暂无历史
+                    </Typography>
+                  ) : (
+                    ragSessions.map((session) => {
+                      const selected = session.session_id === ragSessionId;
+                      return (
+                        <ListItem
+                          key={session.session_id}
+                          disablePadding
+                          sx={{
+                            mb: 0.5,
+                            borderRadius: 1,
+                            bgcolor: selected ? '#e3f2fd' : 'transparent',
+                            '&:hover .rag-session-delete': { opacity: 1 },
+                          }}
+                        >
+                          <ListItemButton
+                            dense
+                            onClick={() => handleSelectRagSession(session.session_id)}
+                            disabled={ragLoading || ragSessionLoading}
+                            sx={{ borderRadius: 1, pr: 4, minHeight: 58 }}
+                          >
+                            <ListItemText
+                              primary={truncateText(session.title || '新的文档问答', 24)}
+                              secondary={[
+                                formatRagSessionTime(session.last_message_at || session.updated_at),
+                                `${session.message_count || 0} 条`,
+                              ].filter(Boolean).join(' | ')}
+                              primaryTypographyProps={{ variant: 'body2', noWrap: true }}
+                              secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
+                            />
+                          </ListItemButton>
+                          <Tooltip title="删除对话">
+                            <span>
+                              <IconButton
+                                className="rag-session-delete"
+                                size="small"
+                                onClick={(event) => handleDeleteRagSession(event, session.session_id)}
+                                disabled={ragLoading || ragSessionLoading}
+                                sx={{
+                                  position: 'absolute',
+                                  right: 2,
+                                  top: '50%',
+                                  transform: 'translateY(-50%)',
+                                  opacity: selected ? 1 : 0,
+                                  transition: 'opacity 120ms',
+                                }}
+                              >
+                                <Delete fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        </ListItem>
+                      );
+                    })
+                  )}
+                </List>
+              </Box>
+              <Divider orientation="vertical" flexItem />
+              <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  {'\u5148\u9009\u62e9\u6587\u4ef6\u70b9\u51fb\u201c\u5165\u5e93\u201d\uff0c\u518d\u6839\u636e\u9879\u76ee\u6587\u6863\u63d0\u95ee\u3002'}
+                </Typography>
+                <Box sx={{ flex: 1, overflowY: 'auto', pr: 1, mb: 2, borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
+                  {ragSessionLoading ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 2 }}>
+                      <CircularProgress size={18} />
+                      <Typography variant="body2" color="text.secondary">正在加载历史对话...</Typography>
+                    </Box>
+                  ) : ragMessages.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                      {'\u6682\u65e0\u5bf9\u8bdd\uff0c\u53ef\u4ee5\u8be2\u95ee\u201c\u8fd9\u4e2a\u9879\u76ee\u6587\u4ef6\u4e3b\u8981\u8bb2\u4e86\u4ec0\u4e48\uff1f\u201d\u6216\u201c\u8d28\u91cf\u68c0\u67e5\u6709\u54ea\u4e9b\u8981\u6c42\uff1f\u201d\u3002'}
+                    </Typography>
+                  ) : (
+                    ragMessages.map((message, index) => (
+                      <Box
+                        key={`${message.role}-${index}`}
+                        sx={{ my: 1.5, display: 'flex', justifyContent: message.role === 'user' ? 'flex-end' : 'flex-start' }}
+                      >
+                        <Paper
+                          variant="outlined"
+                          sx={{
+                            maxWidth: '88%',
+                            p: 1.5,
+                            bgcolor: message.role === 'user' ? '#e3f2fd' : '#fafafa',
+                            borderColor: message.error ? '#ef9a9a' : '#e0e0e0',
+                          }}
+                        >
+                          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{message.content}</Typography>
+                          {message.sources?.length > 0 && (
+                            <Box sx={{ mt: 1 }}>
+                              <Typography variant="caption" color="text.secondary">{'\u6765\u6e90\uff1a'}</Typography>
+                              {message.sources.map((source, sourceIndex) => (
+                                <Typography
+                                  key={`${source.file_id}-${source.chunk_index}-${sourceIndex}`}
+                                  variant="caption"
+                                  color="text.secondary"
+                                  display="block"
+                                >
+                                  {source.file_name}{'\uff08\u7247\u6bb5 '}{source.chunk_index}{'\uff09'}
+                                </Typography>
+                              ))}
+                            </Box>
+                          )}
+                        </Paper>
+                      </Box>
+                    ))
+                  )}
+                  {ragLoading && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 1 }}>
+                      <CircularProgress size={18} />
+                      <Typography variant="body2" color="text.secondary">{'\u6b63\u5728\u68c0\u7d22\u9879\u76ee\u6587\u6863\u5e76\u751f\u6210\u56de\u7b54...'}</Typography>
+                    </Box>
+                  )}
                 </Box>
-              )}
-            </Box>
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              <TextField
-                value={ragQuestion}
-                onChange={(event) => setRagQuestion(event.target.value)}
-                onKeyDown={handleRagKeyDown}
-                placeholder={'\u8f93\u5165\u4f60\u7684\u95ee\u9898'}
-                size="small"
-                multiline
-                maxRows={3}
-                fullWidth
-              />
-              <Button variant="contained" onClick={handleAskRag} disabled={ragLoading} sx={{ minWidth: 48 }}>
-                {ragLoading ? <CircularProgress size={20} color="inherit" /> : <Send />}
-              </Button>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <TextField
+                    value={ragQuestion}
+                    onChange={(event) => setRagQuestion(event.target.value)}
+                    onKeyDown={handleRagKeyDown}
+                    placeholder={'\u8f93\u5165\u4f60\u7684\u95ee\u9898'}
+                    size="small"
+                    multiline
+                    maxRows={3}
+                    fullWidth
+                  />
+                  <Button variant="contained" onClick={handleAskRag} disabled={ragLoading} sx={{ minWidth: 48 }}>
+                    {ragLoading ? <CircularProgress size={20} color="inherit" /> : <Send />}
+                  </Button>
+                </Box>
+              </Box>
             </Box>
           </Paper>
         </Grid>

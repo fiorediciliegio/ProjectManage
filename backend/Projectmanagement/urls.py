@@ -68,6 +68,7 @@ urlpatterns = [
     #RAG
     path('files/<int:file_id>/rag/index/', views.rag_index_file),
     path('projects/<int:project_id>/rag/sessions/', views.rag_chat_sessions),
+    path('projects/<int:project_id>/rag/sessions/<int:session_id>/', views.rag_chat_session_detail),
     path('projects/<int:project_id>/rag/sessions/<int:session_id>/messages/', views.rag_chat_session_messages),
     path('projects/<int:project_id>/rag/chat/', views.rag_chat),
     path('files/<int:file_id>/rag/reindex/', views.rag_reindex_file),

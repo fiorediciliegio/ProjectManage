@@ -316,9 +316,22 @@ class RagLlmContextCompressionTests(SimpleTestCase):
             compressed_results = contextual_compress_search_results(search_results, "安全整改措施有哪些？")
 
         self.assertEqual(fake_completions.last_kwargs["model"], "qwen-compress-test")
+        self.assertEqual(fake_completions.last_kwargs["max_tokens"], 1600)
         self.assertEqual(compressed_results[0]["text"], "安全整改措施包括临边防护复查和脚手架验收。")
         self.assertTrue(compressed_results[0]["llm_contextual_compressed"])
         self.assertTrue(compressed_results[1]["llm_contextual_compression_fallback_kept"])
+
+
+class RagTokenBudgetSettingsTests(SimpleTestCase):
+    def test_rag_llm_token_budgets_are_configured_conservatively(self):
+        from django.conf import settings
+
+        self.assertEqual(settings.RAG_MULTI_QUERY_MAX_TOKENS, 384)
+        self.assertEqual(settings.RAG_LLM_CONTEXT_COMPRESSION_MAX_TOKENS, 1600)
+        self.assertEqual(settings.RAG_CHAT_MAX_TOKENS, 2400)
+        self.assertEqual(settings.RAG_CHAT_MEMORY_SUMMARY_MAX_TOKENS, 1800)
+        self.assertEqual(settings.RAG_CHAT_QUERY_REWRITE_MAX_TOKENS, 512)
+        self.assertEqual(settings.RAGAS_EVAL_MAX_TOKENS, 4096)
 
 
 @override_settings(
@@ -420,6 +433,20 @@ class RagChatSessionTests(TestCase):
         data = response.json()["data"]
         self.assertEqual(data["session"]["session_id"], session.pk)
         self.assertEqual(len(data["messages"]), 2)
+
+    def test_can_delete_owned_rag_session(self):
+        session = RagChatSession.objects.create(
+            project=self.project,
+            owner=self.person,
+            title="待删除会话",
+        )
+        RagChatMessage.objects.create(session=session, role="user", content="第一问")
+
+        response = self.client.delete(f"/projects/{self.project.pk}/rag/sessions/{session.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(RagChatSession.objects.filter(pk=session.pk).exists())
+        self.assertEqual(RagChatMessage.objects.count(), 0)
 
     def test_rag_memory_keeps_recent_messages_and_summarizes_older_messages(self):
         from app01.views import get_rag_memory_context, maybe_update_rag_session_summary

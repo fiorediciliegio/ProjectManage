@@ -171,6 +171,7 @@ def answer_question_with_rag(question, project_id=None, limit=8, history=None, h
                 },
             ],
             temperature=0.2,
+            max_tokens=getattr(settings, 'RAG_CHAT_MAX_TOKENS', 2400),
             stream=True,
         )
     except Exception as exc:

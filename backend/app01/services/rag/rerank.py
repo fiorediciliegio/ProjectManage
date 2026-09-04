@@ -3,6 +3,7 @@ import logging
 import requests
 from django.conf import settings
 
+from app01.services.rag.http_clients import build_no_proxy_requests_session
 from app01.services.rag.text_utils import extract_query_terms
 from app01.services.rag_resilience_service import (
     is_circuit_allowed,
@@ -193,8 +194,9 @@ def rerank_search_results_with_model(question, search_results, top_k=8):
 
     url = getattr(settings, 'RAG_RERANK_BASE_URL').rstrip('/')
 
+    session = build_no_proxy_requests_session()
     try:
-        response = requests.post(
+        response = session.post(
             url,
             headers={
                 'Authorization': f'Bearer {api_key}',
@@ -209,6 +211,8 @@ def rerank_search_results_with_model(question, search_results, top_k=8):
         record_component_failure('rerank', e)
         logger.warning('rag rerank degraded model=%s error=%r', model_name, e)
         return search_results[:top_k]
+    finally:
+        session.close()
 
     record_component_success('rerank')
 

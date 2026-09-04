@@ -568,6 +568,30 @@ def rag_chat_session_messages(request, project_id, session_id):
     )
 
 
+@api_view(['DELETE'])
+def rag_chat_session_detail(request, project_id, session_id):
+    person, auth_error = get_authenticated_person(request)
+    if auth_error:
+        return auth_error
+
+    project, project_error = get_project_for_rag(request, project_id, person)
+    if project_error:
+        return project_error
+
+    session = get_owned_rag_session(project, person, session_id)
+    if not session:
+        return error_response(
+            message='RAG 问答会话不存在',
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    session.delete()
+    return success_response(
+        message='删除 RAG 问答会话成功',
+        status_code=status.HTTP_200_OK,
+    )
+
+
 # 项目问答接口
 @api_view(['POST'])
 def rag_chat(request, project_id):

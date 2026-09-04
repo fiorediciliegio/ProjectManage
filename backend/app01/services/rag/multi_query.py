@@ -96,6 +96,7 @@ def generate_multi_search_queries(question):
                 },
             ],
             temperature=0.2,
+            max_tokens=getattr(settings, 'RAG_MULTI_QUERY_MAX_TOKENS', 384),
         )
         record_component_success('chat_model')
     except Exception as exc:

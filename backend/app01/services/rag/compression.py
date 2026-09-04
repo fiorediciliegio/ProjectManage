@@ -374,6 +374,7 @@ def llm_contextual_compress_search_results(search_results, question):
                 },
             ],
             temperature=0,
+            max_tokens=getattr(settings, 'RAG_LLM_CONTEXT_COMPRESSION_MAX_TOKENS', 1600),
         )
         record_component_success('context_compression')
     except Exception as exc:

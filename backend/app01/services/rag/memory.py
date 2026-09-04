@@ -124,6 +124,7 @@ def summarize_chat_history_for_memory(history, previous_summary=''):
                 },
             ],
             temperature=0,
+            max_tokens=getattr(settings, 'RAG_CHAT_MEMORY_SUMMARY_MAX_TOKENS', 1800),
         )
         record_component_success('chat_model')
     except Exception as exc:
@@ -192,6 +193,7 @@ def rewrite_question_with_history(question, history=None, history_summary=''):
                 },
             ],
             temperature=0,
+            max_tokens=getattr(settings, 'RAG_CHAT_QUERY_REWRITE_MAX_TOKENS', 512),
         )
         record_component_success('chat_model')
     except Exception as exc:

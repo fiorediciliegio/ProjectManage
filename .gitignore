@@ -58,3 +58,8 @@ backend/.paddlex/
 # Load test generated reports
 backend/load_tests/reports/*
 !backend/load_tests/reports/.gitkeep
+
+# RAG evaluation datasets, reports, and intermediate artifacts
+backend/evaluation/*
+!backend/evaluation/
+!backend/evaluation/evaluate_rag_with_ragas.py

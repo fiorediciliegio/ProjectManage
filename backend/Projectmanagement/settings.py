@@ -278,14 +278,18 @@ AUDIT_LOG_ES_INDEX = os.getenv('AUDIT_LOG_ES_INDEX', 'project_audit_logs')
 
 # 向量库 Qdrant
 QDRANT_URL = os.getenv('QDRANT_URL', 'http://127.0.0.1:6333')
-QDRANT_VECTOR_SIZE = int(os.getenv('QDRANT_VECTOR_SIZE', '2560'))
-LANGCHAIN_QDRANT_COLLECTION = os.getenv('LANGCHAIN_QDRANT_COLLECTION', 'project_files_langchain_qwen3_4b')
+EMBEDDING_DIMENSIONS = int(os.getenv('EMBEDDING_DIMENSIONS', os.getenv('QDRANT_VECTOR_SIZE', '1024')))
+QDRANT_VECTOR_SIZE = int(os.getenv('QDRANT_VECTOR_SIZE', str(EMBEDDING_DIMENSIONS)))
+LANGCHAIN_QDRANT_COLLECTION = os.getenv('LANGCHAIN_QDRANT_COLLECTION', 'project_files_dashscope_qwen37_embedding')
 
-# 本地 Embedding 模型
-EMBEDDING_PROVIDER = os.getenv('EMBEDDING_PROVIDER', 'llama_cpp')
-EMBEDDING_BASE_URL = os.getenv('EMBEDDING_BASE_URL', 'http://127.0.0.1:8080/v1')
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'Qwen3-Embedding-4B-GGUF')
+# DashScope Embedding
+EMBEDDING_PROVIDER = os.getenv('EMBEDDING_PROVIDER', 'dashscope')
+EMBEDDING_BASE_URL = os.getenv('EMBEDDING_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+EMBEDDING_API_KEY = os.getenv('EMBEDDING_API_KEY') or os.getenv('DASHSCOPE_API_KEY', '')
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'qwen3.7-text-embedding')
 EMBEDDING_BATCH_SIZE = int(os.getenv('EMBEDDING_BATCH_SIZE', '8'))
+EMBEDDING_TIMEOUT = int(os.getenv('EMBEDDING_TIMEOUT', '60'))
+EMBEDDING_MAX_RETRIES = int(os.getenv('EMBEDDING_MAX_RETRIES', '2'))
 VECTOR_UPSERT_BATCH_SIZE = int(os.getenv('VECTOR_UPSERT_BATCH_SIZE', '16'))
 
 # RAG 回答模型

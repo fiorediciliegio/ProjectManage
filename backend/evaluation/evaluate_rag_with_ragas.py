@@ -249,7 +249,7 @@ def run_ragas_evaluation(ragas_rows, metric_names, batch_size):
     from ragas import evaluate as ragas_evaluate
     from ragas.run_config import RunConfig
 
-    from app01.services.rag.vector_store import LocalOpenAICompatibleEmbeddings
+    from app01.services.rag.vector_store import DashScopeTextEmbeddings
     from django.conf import settings
 
     if not ragas_rows:
@@ -262,7 +262,7 @@ def run_ragas_evaluation(ragas_rows, metric_names, batch_size):
         http_client=httpx.Client(trust_env=False),
         http_async_client=httpx.AsyncClient(trust_env=False),
     )
-    embeddings = LocalOpenAICompatibleEmbeddings()
+    embeddings = DashScopeTextEmbeddings()
     metrics = ragas_available_metrics(metric_names)
     dataset = Dataset.from_list(ragas_rows)
 

@@ -24,6 +24,27 @@ TEST_CACHES = {
 
 
 @override_settings(
+    EMBEDDING_BASE_URL='https://dashscope.aliyuncs.com/compatible-mode/v1',
+    EMBEDDING_MODEL='qwen3.7-text-embedding',
+    EMBEDDING_API_KEY='dashscope-test-key',
+    EMBEDDING_BATCH_SIZE=8,
+    EMBEDDING_TIMEOUT=60,
+)
+class DashScopeEmbeddingConfigTests(SimpleTestCase):
+    def test_embedding_client_uses_dashscope_api_key_and_model(self):
+        from app01.services.rag import vector_store
+
+        with patch.object(vector_store, 'OpenAI') as openai_cls:
+            embeddings = vector_store.DashScopeTextEmbeddings()
+
+        self.assertEqual(embeddings.model, 'qwen3.7-text-embedding')
+        _, kwargs = openai_cls.call_args
+        self.assertEqual(kwargs['api_key'], 'dashscope-test-key')
+        self.assertEqual(kwargs['base_url'], 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+        self.assertEqual(kwargs['timeout'], 60)
+
+
+@override_settings(
     CACHES=TEST_CACHES,
     RAG_CHAT_RATE_LIMIT_ENABLED=True,
     RAG_CHAT_RATE_WINDOW_SECONDS=60,

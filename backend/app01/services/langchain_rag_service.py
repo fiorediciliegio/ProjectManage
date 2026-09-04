@@ -123,7 +123,7 @@ from app01.services.rag.text_utils import (
     truncate_context_text,
 )
 from app01.services.rag.vector_store import (
-    LocalOpenAICompatibleEmbeddings,
+    DashScopeTextEmbeddings,
     delete_langchain_file_vectors,
     ensure_langchain_collection,
     get_indexed_file_ids,
@@ -140,7 +140,7 @@ __all__ = [
     'CONTEXT_MAX_ITEMS',
     'CONTEXT_MAX_ITEMS_PER_FILE',
     'CONTEXT_MIN_ITEM_CHARS',
-    'LocalOpenAICompatibleEmbeddings',
+    'DashScopeTextEmbeddings',
     'MODEL_RERANK_CANDIDATE_LIMIT',
     'RERANK_CANDIDATE_LIMIT',
     'RERANK_FINAL_LIMIT',

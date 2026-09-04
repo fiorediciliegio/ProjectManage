@@ -254,7 +254,7 @@ Local probe environment:
 
 - Backend: Waitress, 16 threads, `127.0.0.1:8006`
 - Worker: Celery on Windows with `-P solo`
-- RAG dependencies: local embedding endpoint `127.0.0.1:8080`, Qdrant `127.0.0.1:6333`, Elasticsearch `127.0.0.1:9200`
+- RAG dependencies: DashScope embedding API, Qdrant `127.0.0.1:6333`, Elasticsearch `127.0.0.1:9200`
 - Load: 5 users, spawn rate 1/s, 45 seconds, fixed project 3
 
 Result:

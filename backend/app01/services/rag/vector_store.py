@@ -15,15 +15,20 @@ from app01.services.elasticsearch_service import (
 from app01.services.rag.loaders import load_file_as_documents, split_documents
 
 # ———————————————————— embedding ————————————————————
-# 本地 Qwen3 Embedding 适配器
-class LocalOpenAICompatibleEmbeddings(Embeddings):
+class DashScopeTextEmbeddings(Embeddings):
     def __init__(self):
+        if not settings.EMBEDDING_API_KEY:
+            raise RuntimeError('EMBEDDING_API_KEY or DASHSCOPE_API_KEY is required for DashScope embeddings.')
+
         self.client = OpenAI(
-            api_key='local',
+            api_key=settings.EMBEDDING_API_KEY,
             base_url=settings.EMBEDDING_BASE_URL,
             http_client=DefaultHttpxClient(trust_env=False),
+            timeout=getattr(settings, 'EMBEDDING_TIMEOUT', 60),
+            max_retries=getattr(settings, 'EMBEDDING_MAX_RETRIES', 2),
         )
         self.model = settings.EMBEDDING_MODEL
+        self.dimensions = int(getattr(settings, 'EMBEDDING_DIMENSIONS', settings.QDRANT_VECTOR_SIZE))
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         cleaned_texts = [
@@ -42,6 +47,7 @@ class LocalOpenAICompatibleEmbeddings(Embeddings):
             response = self.client.embeddings.create(
                 model=self.model,
                 input=batch,
+                dimensions=self.dimensions,
             )
             vectors.extend(item.embedding for item in response.data)
 
@@ -88,7 +94,7 @@ def ensure_langchain_collection():
 # LangChain VectorStore 获取函数
 def get_langchain_vector_store():
     client = ensure_langchain_collection()
-    embeddings = LocalOpenAICompatibleEmbeddings()
+    embeddings = DashScopeTextEmbeddings()
 
     return QdrantVectorStore(
         client=client,

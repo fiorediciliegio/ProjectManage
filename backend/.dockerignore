@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+media/
+qdrant_storage/
+elasticsearch/
+elastic_data/
+es_data/
+.paddlex/
+evaluation/*.json
+evaluation/*.jsonl
+evaluation/*.csv
+evaluation/*.md
+evaluation/reports/

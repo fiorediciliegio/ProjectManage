@@ -1,6 +1,7 @@
 from app01.services.rag.blocks import (
     blocks_to_semantic_documents,
     build_base_metadata,
+    enrich_block_sections,
     get_semantic_merge_profile,
     make_block,
     make_document_from_block,
@@ -36,6 +37,7 @@ from app01.services.rag.pdf_parser import (
     should_skip_pdf_margin_block,
     sort_pdf_text_blocks_by_layout,
 )
+from app01.services.rag.semantic_chunking import semantic_merge_documents
 from app01.services.rag.splitters import get_split_profile, split_documents
 
 
@@ -68,8 +70,9 @@ def load_file_as_blocks(file_obj):
 
 
 def load_file_as_documents(file_obj):
-    blocks = load_file_as_blocks(file_obj)
-    return blocks_to_semantic_documents(blocks)
+    blocks = enrich_block_sections(load_file_as_blocks(file_obj))
+    documents = blocks_to_semantic_documents(blocks)
+    return semantic_merge_documents(documents)
 
 
 def preview_file_chunks(file_obj):

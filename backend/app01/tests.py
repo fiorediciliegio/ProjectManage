@@ -32,16 +32,179 @@ TEST_CACHES = {
 )
 class DashScopeEmbeddingConfigTests(SimpleTestCase):
     def test_embedding_client_uses_dashscope_api_key_and_model(self):
-        from app01.services.rag import vector_store
+        from app01.services.rag import embeddings as embeddings_module
 
-        with patch.object(vector_store, 'OpenAI') as openai_cls:
-            embeddings = vector_store.DashScopeTextEmbeddings()
+        with patch.object(embeddings_module, 'OpenAI') as openai_cls:
+            embeddings = embeddings_module.DashScopeTextEmbeddings()
 
         self.assertEqual(embeddings.model, 'qwen3.7-text-embedding')
         _, kwargs = openai_cls.call_args
         self.assertEqual(kwargs['api_key'], 'dashscope-test-key')
         self.assertEqual(kwargs['base_url'], 'https://dashscope.aliyuncs.com/compatible-mode/v1')
         self.assertEqual(kwargs['timeout'], 60)
+
+
+class RagKeywordIndexFallbackTests(SimpleTestCase):
+    @override_settings(RAG_KEYWORD_INDEX_REQUIRED=False)
+    def test_optional_keyword_index_failure_does_not_break_vector_index_flow(self):
+        from app01.services.rag.vector_store import _run_keyword_index_operation
+
+        result = _run_keyword_index_operation(lambda: (_ for _ in ()).throw(RuntimeError('ES unavailable')))
+
+        self.assertTrue(result['skipped'])
+        self.assertEqual(result['error_type'], 'RuntimeError')
+        self.assertIn('Elasticsearch', result['message'])
+
+    @override_settings(RAG_KEYWORD_INDEX_REQUIRED=True)
+    def test_required_keyword_index_failure_is_raised(self):
+        from app01.services.rag.vector_store import _run_keyword_index_operation
+
+        with self.assertRaises(RuntimeError):
+            _run_keyword_index_operation(lambda: (_ for _ in ()).throw(RuntimeError('ES unavailable')))
+
+
+@override_settings(
+    RAG_SEMANTIC_CHUNKING_ENABLED=True,
+    EMBEDDING_API_KEY='semantic-test-key',
+    RAG_SEMANTIC_CHUNKING_SIMILARITY_THRESHOLD=0.62,
+    RAG_SEMANTIC_CHUNKING_SHORT_MERGE_MIN_SIMILARITY=0.5,
+    RAG_SEMANTIC_CHUNKING_TARGET_CHARS=900,
+    RAG_SEMANTIC_CHUNKING_MAX_CHUNK_CHARS=1400,
+)
+class RagSemanticChunkingTests(SimpleTestCase):
+    class FakeEmbeddings:
+        def __init__(self, vectors):
+            self.vectors = vectors
+            self.seen_texts = []
+
+        def embed_documents(self, texts):
+            self.seen_texts.extend(texts)
+            return self.vectors[:len(texts)]
+
+    def make_doc(self, text, order, block_type='paragraph_semantic', section_path=None):
+        from langchain_core.documents import Document
+
+        section_path = section_path or ['工程概况']
+        return Document(
+            page_content=text,
+            metadata={
+                'file_id': 1,
+                'order': order,
+                'block_type': block_type,
+                'section_path': section_path,
+                'section_title': section_path[-1] if section_path else None,
+            },
+        )
+
+    def test_heading_document_forces_an_independent_chunk(self):
+        from app01.services.rag.semantic_chunking import semantic_merge_documents
+
+        docs = [
+            self.make_doc('一、工程概况', 0, block_type='title'),
+            self.make_doc('本工程位于城市主干路沿线。', 1),
+            self.make_doc('建设内容包括候车亭基础和钢结构。', 2),
+        ]
+
+        merged = semantic_merge_documents(
+            docs,
+            embeddings=self.FakeEmbeddings([[1, 0], [0.99, 0.01]]),
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0].metadata['block_type'], 'title')
+        self.assertEqual(merged[0].metadata['semantic_split_reason'], 'heading')
+        self.assertEqual(merged[0].metadata['source_block_count'], 1)
+        self.assertEqual(merged[1].metadata['source_block_count'], 2)
+
+    def test_table_document_stays_independent_and_is_not_embedded_for_merging(self):
+        from app01.services.rag.semantic_chunking import semantic_merge_documents
+
+        fake_embeddings = self.FakeEmbeddings([[1, 0], [0.9, 0.1]])
+        table_text = '| 名称 | 数量 |\n| --- | --- |\n| 候车亭 | 10 |'
+        docs = [
+            self.make_doc('候车亭采购范围包括基础施工。', 0),
+            self.make_doc(table_text, 1, block_type='table'),
+            self.make_doc('安装完成后需要组织验收。', 2),
+        ]
+
+        merged = semantic_merge_documents(docs, embeddings=fake_embeddings)
+
+        self.assertEqual(len(merged), 3)
+        self.assertEqual(merged[1].metadata['block_type'], 'table')
+        self.assertEqual(merged[1].metadata['semantic_split_reason'], 'table')
+        self.assertEqual(merged[1].metadata['source_block_count'], 1)
+        self.assertNotIn(table_text, fake_embeddings.seen_texts)
+
+    def test_low_similarity_splits_adjacent_paragraphs(self):
+        from app01.services.rag.semantic_chunking import semantic_merge_documents
+
+        docs = [
+            self.make_doc('项目位于市政道路沿线。', 0),
+            self.make_doc('建设内容包括候车亭基础和钢结构。', 1),
+            self.make_doc('安全检查应重点关注临边防护。', 2),
+        ]
+
+        merged = semantic_merge_documents(
+            docs,
+            embeddings=self.FakeEmbeddings([[1, 0], [0.99, 0.01], [0, 1]]),
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0].metadata['source_block_count'], 2)
+        self.assertEqual(merged[0].metadata['semantic_split_reason'], 'low_similarity')
+        self.assertEqual(merged[1].metadata['source_block_count'], 1)
+
+    def test_recursive_splitter_preserves_semantic_metadata_for_long_chunks(self):
+        from langchain_core.documents import Document
+        from app01.services.rag.splitters import split_documents
+
+        long_text = '工程质量检查需要形成闭环记录。' * 180
+        document = Document(
+            page_content=long_text,
+            metadata={
+                'file_id': 1,
+                'block_type': 'paragraph_semantic',
+                'section_title': '质量管理',
+                'section_path': ['质量管理'],
+                'semantic_group_id': 'group-1',
+                'semantic_score': 0.88,
+                'semantic_split_reason': 'target_chars',
+                'source_block_count': 3,
+            },
+        )
+
+        chunks = split_documents([document])
+
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertEqual(chunk.metadata['semantic_group_id'], 'group-1')
+            self.assertEqual(chunk.metadata['section_title'], '质量管理')
+            self.assertEqual(chunk.metadata['source_block_count'], 3)
+            self.assertIn('chunk_index', chunk.metadata)
+
+    def test_pdf_heading_enrichment_updates_following_section_metadata(self):
+        from app01.services.rag.blocks import enrich_block_sections, make_block
+
+        base_metadata = {
+            'file_id': 1,
+            'file_name': '示例.pdf',
+            'project_id': 1,
+            'project_name': '测试项目',
+            'file_extension': '.pdf',
+        }
+        blocks = [
+            make_block('1 工程概况', 'pdf_title', base_metadata, 0, page=1),
+            make_block('本项目包含公交候车亭基础施工。', 'pdf_paragraph', base_metadata, 1, page=1),
+            make_block('1.1 安全检查', 'pdf_title', base_metadata, 2, page=2),
+            make_block('安全检查包括临边防护和用电检查。', 'pdf_paragraph', base_metadata, 3, page=2),
+        ]
+
+        enriched = enrich_block_sections(blocks)
+
+        self.assertEqual(enriched[1]['section_title'], '1 工程概况')
+        self.assertEqual(enriched[1]['section_path'], ['1 工程概况'])
+        self.assertEqual(enriched[3]['section_title'], '1.1 安全检查')
+        self.assertEqual(enriched[3]['section_path'], ['1 工程概况', '1.1 安全检查'])
 
 
 @override_settings(

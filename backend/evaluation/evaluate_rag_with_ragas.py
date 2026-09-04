@@ -249,7 +249,7 @@ def run_ragas_evaluation(ragas_rows, metric_names, batch_size):
     from ragas import evaluate as ragas_evaluate
     from ragas.run_config import RunConfig
 
-    from app01.services.rag.vector_store import DashScopeTextEmbeddings
+    from app01.services.rag.embeddings import DashScopeTextEmbeddings
     from django.conf import settings
 
     if not ragas_rows:

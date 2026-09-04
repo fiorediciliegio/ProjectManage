@@ -1,10 +1,7 @@
 import uuid
-from typing import List
 
 from django.conf import settings
-from langchain_core.embeddings import Embeddings
 from langchain_qdrant import QdrantVectorStore
-from openai import DefaultHttpxClient, OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, VectorParams
 
@@ -12,56 +9,27 @@ from app01.services.elasticsearch_service import (
     delete_file_chunks_from_elasticsearch,
     index_chunks_to_elasticsearch,
 )
+from app01.services.rag.embeddings import DashScopeTextEmbeddings
 from app01.services.rag.loaders import load_file_as_documents, split_documents
 
-# ———————————————————— embedding ————————————————————
-class DashScopeTextEmbeddings(Embeddings):
-    def __init__(self):
-        if not settings.EMBEDDING_API_KEY:
-            raise RuntimeError('EMBEDDING_API_KEY or DASHSCOPE_API_KEY is required for DashScope embeddings.')
 
-        self.client = OpenAI(
-            api_key=settings.EMBEDDING_API_KEY,
-            base_url=settings.EMBEDDING_BASE_URL,
-            http_client=DefaultHttpxClient(trust_env=False),
-            timeout=getattr(settings, 'EMBEDDING_TIMEOUT', 60),
-            max_retries=getattr(settings, 'EMBEDDING_MAX_RETRIES', 2),
-        )
-        self.model = settings.EMBEDDING_MODEL
-        self.dimensions = int(getattr(settings, 'EMBEDDING_DIMENSIONS', settings.QDRANT_VECTOR_SIZE))
+def _run_keyword_index_operation(operation, required=None):
+    try:
+        return operation()
+    except Exception as exc:
+        if required is None:
+            required = getattr(settings, 'RAG_KEYWORD_INDEX_REQUIRED', False)
+        if required:
+            raise
+        return {
+            'indexed_count': 0,
+            'deleted_count': 0,
+            'skipped': True,
+            'error_type': exc.__class__.__name__,
+            'error': str(exc),
+            'message': 'Elasticsearch 关键词索引暂时不可用，已跳过关键词索引操作',
+        }
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        cleaned_texts = [
-            self._clean_text(text) or ' '
-            for text in texts
-        ]
-
-        if not cleaned_texts:
-            return []
-
-        batch_size = max(1, int(getattr(settings, 'EMBEDDING_BATCH_SIZE', 8)))
-        vectors = []
-
-        for start in range(0, len(cleaned_texts), batch_size):
-            batch = cleaned_texts[start:start + batch_size]
-            response = self.client.embeddings.create(
-                model=self.model,
-                input=batch,
-                dimensions=self.dimensions,
-            )
-            vectors.extend(item.embedding for item in response.data)
-
-        return vectors
-
-    def embed_query(self, text: str) -> List[float]:
-        vectors = self.embed_documents([text])
-        if not vectors:
-            return []
-        return vectors[0]
-
-    @staticmethod
-    def _clean_text(text):
-        return (text or '').replace('\n', ' ').strip()
 
 # Qdrant collection 初始化函数
 def get_langchain_qdrant_client():
@@ -103,7 +71,7 @@ def get_langchain_vector_store():
     )
 
 # 删除旧向量
-def delete_langchain_file_vectors(file_id, stage_callback=None):
+def delete_langchain_file_vectors(file_id, stage_callback=None, keyword_index_required=None):
     notify_stage(stage_callback, 'qdrant_connect')
     client = ensure_langchain_collection()
 
@@ -121,7 +89,10 @@ def delete_langchain_file_vectors(file_id, stage_callback=None):
     )
 
     notify_stage(stage_callback, 'elasticsearch_index')
-    elasticsearch_result = delete_file_chunks_from_elasticsearch(file_id)
+    elasticsearch_result = _run_keyword_index_operation(
+        lambda: delete_file_chunks_from_elasticsearch(file_id),
+        required=keyword_index_required,
+    )
     return {
         'file_id': file_id,
         'qdrant_deleted': True,
@@ -185,7 +156,11 @@ def index_file_to_qdrant_langchain(file_obj, stage_callback=None):
         }
 
     notify_stage(stage_callback, 'cleanup')
-    delete_langchain_file_vectors(file_obj.pk, stage_callback=stage_callback)
+    delete_langchain_file_vectors(
+        file_obj.pk,
+        stage_callback=stage_callback,
+        keyword_index_required=False,
+    )
 
     notify_stage(stage_callback, 'qdrant_connect')
     vector_store = get_langchain_vector_store()
@@ -205,14 +180,19 @@ def index_file_to_qdrant_langchain(file_obj, stage_callback=None):
         notify_stage(stage_callback, 'qdrant_upsert')
 
     notify_stage(stage_callback, 'elasticsearch_index')
-    elasticsearch_result = index_chunks_to_elasticsearch(file_obj, chunks)
+    elasticsearch_result = _run_keyword_index_operation(
+        lambda: index_chunks_to_elasticsearch(file_obj, chunks)
+    )
     file_name = f'{file_obj.NAME_File}{file_obj.FORM_File or ""}'
+    keyword_index_skipped = bool(elasticsearch_result.get('skipped'))
     return {
         'file_id': file_obj.pk,
         'file_name': file_name,
         'chunks_count': len(chunks),
         'elasticsearch_chunks_count': elasticsearch_result.get('indexed_count', 0),
-        'message': '文件向量和关键词索引入库成功',
+        'keyword_index_skipped': keyword_index_skipped,
+        'keyword_index_error': elasticsearch_result.get('error') if keyword_index_skipped else '',
+        'message': '文件向量入库成功，关键词索引暂时跳过' if keyword_index_skipped else '文件向量和关键词索引入库成功',
     }
 # ———————————————————— 混合检索 ————————————————————
 # 检索函数

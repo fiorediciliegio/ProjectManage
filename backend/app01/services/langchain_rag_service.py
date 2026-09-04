@@ -122,8 +122,8 @@ from app01.services.rag.text_utils import (
     looks_like_table_or_figure_text,
     truncate_context_text,
 )
+from app01.services.rag.embeddings import DashScopeTextEmbeddings
 from app01.services.rag.vector_store import (
-    DashScopeTextEmbeddings,
     delete_langchain_file_vectors,
     ensure_langchain_collection,
     get_indexed_file_ids,

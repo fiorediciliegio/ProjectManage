@@ -1,3 +1,5 @@
+import re
+
 from langchain_core.documents import Document
 
 
@@ -14,16 +16,85 @@ def build_base_metadata(file_obj):
 
 # 结构化数据
 def make_block(text, block_type, base_metadata, order, title_path=None, page=None, sheet_name=None, caption=None):
+    title_path = title_path or []
     return {
         **base_metadata,
         'text': (text or '').strip(),
         'block_type': block_type,
-        'title_path': title_path or [],
+        'title_path': title_path,
+        'section_title': title_path[-1] if title_path else None,
+        'section_path': title_path.copy(),
+        'section_level': len(title_path) if title_path else None,
         'page': page,
         'sheet_name': sheet_name,
         'caption': caption,
         'order': order,
     }
+
+
+def normalize_section_title(text, max_chars=120):
+    title = re.sub(r'\s+', ' ', (text or '').strip())
+    if len(title) <= max_chars:
+        return title
+    return title[:max_chars].rstrip()
+
+
+def infer_section_level(text, default=1):
+    normalized = normalize_section_title(text)
+
+    if re.match(r'^第[一二三四五六七八九十百千万\d]+章', normalized):
+        return 1
+    if re.match(r'^第[一二三四五六七八九十百千万\d]+节', normalized):
+        return 2
+
+    dotted_number = re.match(r'^(\d+(?:\.\d+){0,5})[\s、.．-]+', normalized)
+    if dotted_number:
+        return min(dotted_number.group(1).count('.') + 1, 6)
+
+    if re.match(r'^[一二三四五六七八九十]+[、.．]', normalized):
+        return 1
+    if re.match(r'^[（(][一二三四五六七八九十]+[）)]', normalized):
+        return 2
+    if re.match(r'^\d+[、.．]\s*', normalized):
+        return 2
+
+    return default
+
+
+def enrich_block_sections(blocks):
+    enriched_blocks = []
+    title_stack = []
+
+    for block in blocks:
+        item = dict(block)
+        block_type = item.get('block_type')
+        text = item.get('text') or ''
+        existing_path = [
+            normalize_section_title(title)
+            for title in (item.get('title_path') or [])
+            if normalize_section_title(title)
+        ]
+
+        if block_type in ['title', 'pdf_title']:
+            if existing_path:
+                title_stack = existing_path
+            else:
+                level = infer_section_level(text, default=1)
+                title_stack = title_stack[:level - 1]
+                title = normalize_section_title(text)
+                if title:
+                    title_stack.append(title)
+            section_path = title_stack.copy()
+        else:
+            section_path = existing_path or title_stack.copy()
+
+        item['title_path'] = section_path
+        item['section_path'] = section_path.copy()
+        item['section_title'] = section_path[-1] if section_path else None
+        item['section_level'] = len(section_path) if section_path else None
+        enriched_blocks.append(item)
+
+    return enriched_blocks
 
 # 定义不同文件类型和 block 类型的切分策略
 def get_semantic_merge_profile(block):

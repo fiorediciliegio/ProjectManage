@@ -26,7 +26,7 @@ ProjectManage 是一个面向工程项目管理场景的前后端分离 Web 系�
 
 ### RAG 智能文档问答
 
-- 支持将项目文件解析、切分、向量化并写入 Qdrant。
+- 支持将项目文件解析、结构化切分、语义合并、向量化并写入 Qdrant。
 - 支持文件重新入库、删除文件向量、入库状态查询、失败重试和任务取消。
 - 支持项目范围内的文档问答，回答包含来源片段引用。
 - 支持左侧历史会话栏，提供新建会话、切换历史会话和删除会话能力。
@@ -171,7 +171,9 @@ ProjectManage/
 │  │  │     ├─ file_parsers.py                   # Word、Excel、文本等文件解析
 │  │  │     ├─ pdf_parser.py                     # PDF 正文、表格、扫描页 OCR 解析
 │  │  │     ├─ image_parser.py                   # 图片 OCR 解析
-│  │  │     ├─ splitters.py                      # 文档切分策略
+│  │  │     ├─ splitters.py                      # 超长文本递归切分兜底
+│  │  │     ├─ semantic_chunking.py              # Embedding 语义合并、标题强制切分、表格独立处理
+│  │  │     ├─ embeddings.py                     # DashScope Embedding 客户端适配
 │  │  │     ├─ vector_store.py                   # Embedding、Qdrant 向量写入与删除
 │  │  │     ├─ retrieval.py                      # 混合检索主流程：向量检索、关键词检索、RRF 融合
 │  │  │     ├─ rerank.py                         # 规则 rerank 与模型 rerank
@@ -229,7 +231,10 @@ RAG 主链路由 `backend/app01/services/langchain_rag_service.py` 保持兼容�
 文件上传
 -> 文件解析
 -> 文档结构化 block
--> 语义切分
+-> 标题/章节 metadata 补强
+-> 规则语义合并
+-> Embedding 相似度语义合并
+-> 超长文本递归切分兜底
 -> DashScope Embedding
 -> Qdrant 向量入库
 -> Elasticsearch BM25 关键词索引
@@ -252,7 +257,9 @@ RAG 主链路由 `backend/app01/services/langchain_rag_service.py` 保持兼容�
 - `file_parsers.py`：处理 Word、Excel、文本等结构化或半结构化文件。
 - `pdf_parser.py`：处理 PDF 正文、表格、页眉页脚和扫描页 OCR。
 - `image_parser.py`：处理图片 OCR。
-- `splitters.py`：根据文档类型和文本结构执行 chunk 切分。
+- `splitters.py`：根据文档类型和文本结构对超长文本执行递归切分兜底。
+- `semantic_chunking.py`：基于标题强制切分、表格独立处理和 Embedding 相似度进行短段落语义合并。
+- `embeddings.py`：封装 DashScope Embedding 客户端，供语义切分和向量入库复用。
 - `vector_store.py`：封装 Embedding、Qdrant collection 创建、向量写入、向量删除和向量查询。
 - `retrieval.py`：编排向量检索、关键词检索、多路召回和 RRF 融合。
 - `rerank.py`：执行规则 rerank、模型 rerank 和分数融合。
@@ -309,10 +316,19 @@ CELERY_BROKER_URL=redis://127.0.0.1:6379/0
 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1
 CACHE_URL=redis://127.0.0.1:6379/2
 
+ELASTICSEARCH_REQUEST_TIMEOUT=20
+ELASTICSEARCH_MAX_RETRIES=2
+ELASTICSEARCH_BULK_CHUNK_SIZE=100
+ELASTICSEARCH_BULK_REQUEST_TIMEOUT=60
+RAG_KEYWORD_INDEX_REQUIRED=False
+
 EMBEDDING_PROVIDER=dashscope
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=qwen3.7-text-embedding
 EMBEDDING_DIMENSIONS=1024
+RAG_SEMANTIC_CHUNKING_ENABLED=True
+RAG_SEMANTIC_CHUNKING_SIMILARITY_THRESHOLD=0.62
+RAG_SEMANTIC_CHUNKING_SHORT_MERGE_MIN_SIMILARITY=0.5
 
 DASHSCOPE_API_KEY=replace-with-your-api-key
 RAG_CHAT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -341,10 +357,19 @@ DASHSCOPE_API_KEY=replace-with-your-api-key
 RAG_CHAT_MODEL=qwen3.8-max
 RAG_RERANK_MODEL=qwen3-rerank
 
+ELASTICSEARCH_REQUEST_TIMEOUT=20
+ELASTICSEARCH_MAX_RETRIES=2
+ELASTICSEARCH_BULK_CHUNK_SIZE=100
+ELASTICSEARCH_BULK_REQUEST_TIMEOUT=60
+RAG_KEYWORD_INDEX_REQUIRED=False
+
 EMBEDDING_PROVIDER=dashscope
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=qwen3.7-text-embedding
 EMBEDDING_DIMENSIONS=1024
+RAG_SEMANTIC_CHUNKING_ENABLED=True
+RAG_SEMANTIC_CHUNKING_SIMILARITY_THRESHOLD=0.62
+RAG_SEMANTIC_CHUNKING_SHORT_MERGE_MIN_SIMILARITY=0.5
 ```
 
 Embedding 与回答模型共用 `DASHSCOPE_API_KEY`，也可以通过 `EMBEDDING_API_KEY` 单独覆盖 Embedding 调用凭据。
@@ -464,7 +489,7 @@ http://localhost:8000
 2. 点击文件入库，后端创建异步任务并将文件状态更新为排队中。
 3. Celery Worker 解析文件内容，必要时调用 OCR。
 4. 文本被切分为 chunk，并写入 Qdrant 向量库。
-5. 同步写入 Elasticsearch，用于关键词检索和混合召回。
+5. 同步写入 Elasticsearch，用于关键词检索和混合召回；本地部署中如果 Elasticsearch 短暂不可用，系统会优先保证 Qdrant 向量入库完成，并记录关键词索引跳过信息。
 6. 用户在项目文档问答区提问。
 7. 系统根据历史会话进行问题改写，并通过 Multi-Query 生成多个检索问题。
 8. 系统执行向量检索和关键词检索，通过 RRF 融合候选结果。

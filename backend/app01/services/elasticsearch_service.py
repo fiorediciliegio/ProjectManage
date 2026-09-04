@@ -3,7 +3,12 @@ from elasticsearch import Elasticsearch, helpers
 
 # 接入 ES 服务
 def get_elasticsearch_client():
-    return Elasticsearch(settings.ELASTICSEARCH_URL)
+    return Elasticsearch(
+        settings.ELASTICSEARCH_URL,
+        request_timeout=getattr(settings, 'ELASTICSEARCH_REQUEST_TIMEOUT', 20),
+        max_retries=getattr(settings, 'ELASTICSEARCH_MAX_RETRIES', 2),
+        retry_on_timeout=True,
+    )
 
 # ———————————————————— 保存文件 chunk ————————————————————
 def ensure_file_chunk_index():
@@ -103,7 +108,12 @@ def index_chunks_to_elasticsearch(file_obj, chunks):
             'message': '没有可写入 Elasticsearch 的文档片段',
         }
 
-    helpers.bulk(client, actions)
+    helpers.bulk(
+        client,
+        actions,
+        chunk_size=getattr(settings, 'ELASTICSEARCH_BULK_CHUNK_SIZE', 100),
+        request_timeout=getattr(settings, 'ELASTICSEARCH_BULK_REQUEST_TIMEOUT', 60),
+    )
 
     return {
         'indexed_count': len(actions),

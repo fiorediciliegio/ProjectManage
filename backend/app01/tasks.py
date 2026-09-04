@@ -339,6 +339,7 @@ def rag_delete_file_vectors_task(self, file_id):
         delete_result = delete_langchain_file_vectors(
             file_obj.pk,
             stage_callback=build_stage_callback(file_id),
+            keyword_index_required=True,
         )
         ensure_file_index_not_cancelled(file_id)
 
